@@ -528,7 +528,7 @@ do_accept(
                   timer = Timer,
                   this_flags = 0,
                   allowed = NewAllowed},
-            dist_util:handshake_other_started(trace(HSData));
+            dist_util:handshake_other_started(trace(hs_data_finalize(HSData)));
         {AcceptPid, exit} ->
             %% this can happen when connection was initiated, but dropped
             %%  between TLS handshake completion and dist handshake start
@@ -677,7 +677,7 @@ do_setup(
               this_flags = 0,
               other_version = Version,
               request_type = Type},
-        dist_util:handshake_we_started(trace(HSData))
+        dist_util:handshake_we_started(trace(hs_data_finalize(HSData)))
     else
         Other ->
             %% Other Node may have closed since
@@ -1087,6 +1087,14 @@ ktls_opt_cipher(
   _OS, TLS_version, CipherSpec, _CipherState, _CipherSeq, _TxRx) ->
     {error,
      {ktls_notsup, {cipher, TLS_version, CipherSpec, _CipherState}}}.
+
+hs_data_finalize(HSData) ->
+    case application:get_env(kernel, dist_hs_data_finalize_fun) of
+        {ok, Fun} when is_function(Fun) ->
+            Fun(HSData);
+        _ ->
+            HSData
+    end.
 
 
 %% -------------------------------------------------------------------------
