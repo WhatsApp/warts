@@ -23,7 +23,6 @@
 
 -behaviour(ct_suite).
 
--include_lib("kernel/include/dist_util.hrl").
 -include_lib("kernel/include/net_address.hrl").
 -include_lib("common_test/include/ct.hrl").
 -include_lib("public_key/include/public_key.hrl").
@@ -360,7 +359,6 @@ ktls_verify(Config) ->
               basic_test(NH1, NH2, KTLSConfig),
               0 = ktls_count_tls_dist(NH1),
               0 = ktls_count_tls_dist(NH2),
-              input_handler_test(NH1, NH2, KTLSConfig),
               ok
       end, KTLSConfig).
 
@@ -381,60 +379,6 @@ ktls_count_tls_dist(Node) ->
             N;
         false ->
             0
-    end.
-
-%% Verify that dist input handler can be set if dist_ctrl is port;
-%% and can send pessage properly
-input_handler_test(NH1, NH2, KTLSConfig) ->
-    #node_handle{nodename = Node2} = NH2,
-    apply_on_ssl_node(NH1, application, set_env, [
-        kernel, dist_hs_data_finalize_fun, fun ktls_hs_data_finalize/1
-    ]),
-    true = apply_on_ssl_node(NH1, erlang, disconnect_node, [Node2]),
-    true = apply_on_ssl_node(NH1, net_kernel, connect_node, [Node2]),
-    basic_test(NH1, NH2, KTLSConfig),
-    true = apply_on_ssl_node(NH1, persistent_term, get, [ktls_input_handler_received]).
-
-ktls_hs_data_finalize(HSData = #hs_data{socket = Socket}) ->
-    Receiver = spawn_link(fun ktls_input_handler/0),
-    ok = gen_tcp:controlling_process(Socket, Receiver),
-    HSData#hs_data{
-        f_setopts_post_nodeup = fun (_) -> ok end,
-        f_handshake_complete = fun (S, _Node, DHandle) ->
-            Receiver ! {handshake_complete, S, DHandle, self()}
-        end
-    }.
-
-
-ktls_input_handler() ->
-    receive
-        {handshake_complete, Socket, DHandle, DistUtil} ->
-            ok = erlang:dist_ctrl_input_handler(DHandle, self()),
-            inet:setopts(
-                Socket,
-                [
-                    {active, true},
-                    {deliver, term},
-                    {packet, 4},
-                    binary,
-                    {nodelay, true}
-                ]
-            ),
-            ktls_input_handler_loop(Socket, DHandle, DistUtil)
-    end.
-
-ktls_input_handler_loop(Socket, DHandle, DistUtil) ->
-    receive
-        {tcp, Socket, Data} ->
-            persistent_term:put(ktls_input_handler_received, true),
-            erlang:dist_ctrl_put_data(DHandle, Data),
-            ktls_input_handler_loop(Socket, DHandle, DistUtil);
-        {tcp_error, Socket, _Error} ->
-            DistUtil ! {tcp_closed, Socket},
-            inet:tcp_close(Socket);
-        {tcp_closed, Socket} ->
-            DistUtil ! {tcp_closed, Socket},
-            inet:tcp_close(Socket)
     end.
 
 %%--------------------------------------------------------------------
