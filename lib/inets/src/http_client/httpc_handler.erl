@@ -1267,7 +1267,7 @@ is_keep_alive_connection(Headers, #session{client_close = ClientClose}) ->
 
 try_to_enable_pipeline_or_keep_alive(
   #state{session      = Session, 
-	 request      = #request{method = Method},
+	 request      = #request{method = Method, started = Started},
 	 status_line  = {Version, _, _},
 	 headers      = Headers,
 	 profile_name = ProfileName} = State) ->
@@ -1278,14 +1278,16 @@ try_to_enable_pipeline_or_keep_alive(
 		  httpc_request:is_idempotent(Method)) of
 		true ->
 		    insert_session(Session, ProfileName),
-		    State#state{status = pipeline};
+		    PipelineTimeout = min(State#state.options#options.pipeline_timeout, server_keep_alive_timeout(Headers, Started)),
+		    State#state{status = pipeline, options = State#state.options#options{pipeline_timeout = PipelineTimeout}};
 		false ->
 		    insert_session(Session, ProfileName),
 		    %% Make sure type is keep_alive in session
 		    %% as it in this case might be pipeline
 		    NewSession = Session#session{type = keep_alive}, 
+		    KeepAliveTimeout = min(State#state.options#options.keep_alive_timeout, server_keep_alive_timeout(Headers, Started)),
 		    State#state{status  = keep_alive,
-				session = NewSession}
+				session = NewSession, options = State#state.options#options{keep_alive_timeout = KeepAliveTimeout}}
 	    end;
 	false ->
 	    State#state{status = close}
@@ -1298,6 +1300,25 @@ handle_server_closing(State = #state{headers = Headers}) ->
         true -> State#state{status = close};
         false -> State
     end.
+
+server_keep_alive_timeout(#http_response_h{other = Other}, Started) ->
+    KeepAlive = proplists:get_value("keep-alive", Other, ""),
+    find_timeout(string:tokens(KeepAlive, "=, "), Started).
+
+find_timeout(["timeout", Value | Rest], Started) ->
+    case string:to_integer(Value) of
+        {N, []} -> case http_util:timeout(N * 1000, Started) of
+            I when I > 0 ->
+                I;
+            _ ->
+                0
+            end;
+        _ -> find_timeout([Value | Rest], Started)
+    end;
+find_timeout([_ | Tail], Started) ->
+    find_timeout(Tail, Started);
+find_timeout([], _Started) ->
+    infinity.
 
 answer_request(#request{id = RequestId, from = From} = Request, Msg, 
 	       #state{session      = Session, 
