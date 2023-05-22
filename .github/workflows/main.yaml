@@ -525,9 +525,7 @@ jobs:
     if: needs.pack.outputs.changes != '[]'
     strategy:
       matrix:
-        # type: ${{ fromJson(needs.pack.outputs.all) }}
-        type: ${{ fromJson(needs.pack.outputs.changes) }}
-        # type: ["os_mon","sasl"]
+        type: ${{ fromJson(needs.pack.outputs.all) }}
       fail-fast: false
     steps:
       - uses: actions/checkout@v3
