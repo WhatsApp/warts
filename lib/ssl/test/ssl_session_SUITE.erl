@@ -23,6 +23,7 @@
 
 -behaviour(ct_suite).
 
+-include("ssl_test_lib.hrl").
 -include("tls_handshake.hrl").
 -include("ssl_record.hrl").
 
@@ -464,6 +465,8 @@ no_reuses_session_server_restart_new_cert() ->
 no_reuses_session_server_restart_new_cert(Config) when is_list(Config) ->
     ClientOpts = ssl_test_lib:ssl_options(client_rsa_der_opts, Config),
     ServerOpts = ssl_test_lib:ssl_options(server_rsa_der_verify_opts, Config),
+    POpts = proplists:get_value(protocol_opts, Config, []),
+
     #{client_config := NewCOpts,
       server_config := NewSOpts} = ssl_test_lib:make_cert_chains_der(rsa,
                                                                      [[{key, ssl_test_lib:hardcode_rsa_key(4)}],
@@ -493,19 +496,19 @@ no_reuses_session_server_restart_new_cert(Config) when is_list(Config) ->
     Server1 = ssl_test_lib:start_server([{node, ServerNode}, {port, Port},
                                          {from, self()},
                                          {mfa, {ssl_test_lib, session_info_result, []}},
-                                         {options, [{reuseaddr, true} | NewSOpts]}]),
+                                         {options, [{reuseaddr, true} | NewSOpts ++ POpts]}]),
 
     Client1 = ssl_test_lib:start_client([{node, ClientNode},
                                          {port, Port}, {host, Hostname},
                                          {mfa, {ssl_test_lib, session_info_result, []}},
-                                         {from, self()},  {options, NewCOpts}]),
+                                         {from, self()},  {options, NewCOpts ++ POpts}]),
     Info1 = receive {Server1, Info10} -> Info10 end,
 
     receive
 	{Client1, Info0} ->
 	    ct:fail(session_reused_when_server_has_new_cert);
 	{Client1, Info1} ->
-            ct:pal("First: ~p~nSecond ~p~n",[Info0, Info1]);
+            ?CT_LOG("First: ~p~nSecond ~p~n",[Info0, Info1]);
         Unexpected ->
             ct:fail({unexpected, Unexpected, {Client1, Info1}})
     end,
@@ -520,6 +523,8 @@ no_reuses_session_server_restart_new_cert_file() ->
 no_reuses_session_server_restart_new_cert_file(Config) when is_list(Config) ->
     ClientOpts = ssl_test_lib:ssl_options(client_rsa_opts, Config),
     ServerOpts = ssl_test_lib:ssl_options(server_rsa_verify_opts, Config),
+    POpts = proplists:get_value(protocol_opts, Config, []),
+
     #{client_config := NewCOpts,
       server_config := NewSOpts} = ssl_test_lib:make_cert_chains_pem(rsa,
                                                                      [[{key, ssl_test_lib:hardcode_rsa_key(4)}],
@@ -534,14 +539,14 @@ no_reuses_session_server_restart_new_cert_file(Config) when is_list(Config) ->
     Server =
 	ssl_test_lib:start_server([{node, ServerNode}, {port, 0},
 				   {from, self()},
-		      {mfa, {ssl_test_lib, session_info_result, []}},
+                                   {mfa, {ssl_test_lib, session_info_result, []}},
 				   {options, NewServerOpts0}]),
     Port = ssl_test_lib:inet_port(Server),
     Client0 =
 	ssl_test_lib:start_client([{node, ClientNode},
-		      {port, Port}, {host, Hostname},
-			    {mfa, {ssl_test_lib, no_result, []}},
-		      {from, self()},  {options, ClientOpts}]),
+                                   {port, Port}, {host, Hostname},
+                                   {mfa, {ssl_test_lib, no_result, []}},
+                                   {from, self()},  {options, ClientOpts}]),
     SessionInfo =
 	receive
 	    {Server, Info} ->
@@ -561,13 +566,13 @@ no_reuses_session_server_restart_new_cert_file(Config) when is_list(Config) ->
     Server1 =
 	ssl_test_lib:start_server([{node, ServerNode}, {port, Port},
 				   {from, self()},
-		      {mfa, {ssl_test_lib, no_result, []}},
-				   {options,  [{reuseaddr, true} | NewServerOpts1]}]),
+                                   {mfa, {ssl_test_lib, no_result, []}},
+				   {options,  [{reuseaddr, true} | NewServerOpts1 ++ POpts]}]),
     Client1 =
 	ssl_test_lib:start_client([{node, ClientNode},
-		      {port, Port}, {host, Hostname},
-		      {mfa, {ssl_test_lib, session_info_result, []}},
-				   {from, self()},  {options, NewCOpts}]),
+                                   {port, Port}, {host, Hostname},
+                                   {mfa, {ssl_test_lib, session_info_result, []}},
+				   {from, self()},  {options, NewCOpts ++ POpts}]),
     receive
 	{Client1, SessionInfo} ->
 	    ct:fail(session_reused_when_server_has_new_cert);
@@ -649,7 +654,7 @@ session_cachce_info(SessionCache) ->
 
 check_table_did_not_grow(SessionCachePid, N) ->
     {SessionCacheCb, SessionCacheDb} = session_cachce_info(SessionCachePid),
-    ct:pal("Run ~p ~p", [SessionCacheCb, SessionCacheDb]),
+    ?CT_LOG("Run ~p ~p", [SessionCacheCb, SessionCacheDb]),
     case catch SessionCacheCb:size(SessionCacheDb) of
         N ->
             ok;
@@ -750,14 +755,13 @@ client_hello(Random) ->
 		  random = Random,
 		  session_id = crypto:strong_rand_bytes(32),
 		  cipher_suites = CipherSuites,
-		  compression_methods = [0],
 		  extensions = Extensions
 		 }.
 
 connection_states(Random) ->
     #{current_write =>
           #{beast_mitigation => one_n_minus_one,cipher_state => undefined,
-		 client_verify_data => undefined,compression_state => undefined,
+		 client_verify_data => undefined,
 		 mac_secret => undefined,secure_renegotiation => undefined,
             security_parameters =>
                 #security_parameters{
@@ -772,7 +776,6 @@ connection_states(Random) ->
                    mac_algorithm = 0,
                    prf_algorithm = 0,
                    hash_size = 0,
-                   compression_algorithm = 0,
                    master_secret = undefined,
                    resumption_master_secret = undefined,
                    client_random = Random,

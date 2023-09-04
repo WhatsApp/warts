@@ -20,6 +20,7 @@
 
 -module(tls_1_3_record_SUITE).
 
+-include("ssl_test_lib.hrl").
 -include_lib("common_test/include/ct.hrl").
 -include_lib("ssl/src/tls_record.hrl").
 -include_lib("ssl/src/tls_handshake.hrl").
@@ -87,7 +88,7 @@ encode_decode(_Config) ->
                      <<197,54,168,218,54,91,157,58,30,201,197,142,51,58,53,231,228,
                        131,57,122,170,78,82,196,30,48,23,16,95,255,185,236>>,
                      undefined,undefined,undefined,16},
-                client_verify_data => undefined,compression_state => undefined,
+                client_verify_data => undefined,
                 mac_secret => undefined,secure_renegotiation => undefined,
                 security_parameters =>
                     #security_parameters{
@@ -118,7 +119,7 @@ encode_decode(_Config) ->
                      <<197,54,168,218,54,91,157,58,30,201,197,142,51,58,53,231,228,
                        131,57,122,170,78,82,196,30,48,23,16,95,255,185,236>>,
                      undefined,undefined,undefined,16},
-                client_verify_data => undefined,compression_state => undefined,
+                client_verify_data => undefined,
                 mac_secret => undefined,secure_renegotiation => undefined,
                 security_parameters =>
                     #security_parameters{
@@ -180,7 +181,7 @@ encode_decode(_Config) ->
         tls_record_1_3:decode_cipher_text(CipherText, ConnectionStates),
 
     DecodedText = iolist_to_binary(PlainText),
-    ct:log("Decoded: ~p ~n", [DecodedText]),
+    ?CT_LOG("Decoded: ~p ~n", [DecodedText]),
     ok.
 %%--------------------------------------------------------------------
 '1_RTT_handshake'() ->

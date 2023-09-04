@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %%
-%% Copyright Ericsson AB 1997-2022. All Rights Reserved.
+%% Copyright Ericsson AB 1997-2023. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -42,7 +42,9 @@
          ntoa/1, ipv4_mapped_ipv6_address/1]).
 
 -export([connect_options/2, listen_options/2, udp_options/2, sctp_options/2]).
--export([udp_module/1, tcp_module/1, tcp_module/2, sctp_module/1]).
+-export([udp_module/1, udp_module/2,
+         tcp_module/1, tcp_module/2,
+         sctp_module/1]).
 -export([gen_tcp_module/1, gen_udp_module/1]).
 
 -export([i/0, i/1, i/2]).
@@ -1181,8 +1183,9 @@ gen_tcp_module(Opts, socket) ->
 udp_options() ->
     [
      debug,
-     tos, tclass,
-     priority, reuseaddr, sndbuf, recbuf, header, active, buffer, mode,
+     tos, tclass, priority,
+     reuseaddr, reuseport, reuseport_lb, exclusiveaddruse,
+     sndbuf, recbuf, header, active, buffer, mode,
      recvtos, recvtclass, ttl, recvttl, deliver, ipv6_v6only,
      broadcast, dontroute, multicast_if, multicast_ttl, multicast_loop,
      add_membership, drop_membership, read_packets, raw,
@@ -1258,8 +1261,16 @@ udp_add(Name, Val, #udp_opts{} = R, Opts, As) ->
     end.
 
 udp_module(Opts) ->
+    udp_module_1(Opts, undefined).
+
+udp_module(Opts, Addr) ->
+    Address = {undefined, Addr},
+    %% Address has to be a 2-tuple but the first element is ignored
+    udp_module_1(Opts, Address).
+
+udp_module_1(Opts, Address) ->
     mod(
-      Opts, udp_module, undefined,
+      Opts, udp_module, Address,
       #{inet => inet_udp, inet6 => inet6_udp, local => local_udp}).
 
 gen_udp_module([{inet_backend, Flag}|Opts]) ->
@@ -1293,8 +1304,9 @@ sctp_options() ->
 [   % The following are generic inet options supported for SCTP sockets:
     debug,
     mode, active, buffer, tos, tclass, ttl,
-    priority, dontroute, reuseaddr, linger,
-    recvtos, recvtclass, recvttl,
+    priority, dontroute,
+    reuseaddr, reuseport, reuseport_lb, exclusiveaddruse,
+    linger, recvtos, recvtclass, recvttl,
     sndbuf, recbuf, ipv6_v6only, high_msgq_watermark, low_msgq_watermark,
     bind_to_device,
 

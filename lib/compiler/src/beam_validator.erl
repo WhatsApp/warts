@@ -404,10 +404,6 @@ vi({fmove,{fr,_}=Src,Dst}, Vst0) ->
     assert_freg_set(Src, Vst0),
     Vst = eat_heap_float(Vst0),
     create_term(#t_float{}, fmove, [], Dst, Vst);
-vi({kill,Reg}, Vst) ->
-    create_tag(initialized, kill, [], Reg, Vst);
-vi({init,Reg}, Vst) ->
-    create_tag(initialized, init, [], Reg, Vst);
 vi({init_yregs,{list,Yregs}}, Vst0) ->
     case ordsets:from_list(Yregs) of
         [] -> error(empty_list);
@@ -590,10 +586,6 @@ vi({allocate,Stk,Live}, Vst) ->
     allocate(uninitialized, Stk, 0, Live, Vst);
 vi({allocate_heap,Stk,Heap,Live}, Vst) ->
     allocate(uninitialized, Stk, Heap, Live, Vst);
-vi({allocate_zero,Stk,Live}, Vst) ->
-    allocate(initialized, Stk, 0, Live, Vst);
-vi({allocate_heap_zero,Stk,Heap,Live}, Vst) ->
-    allocate(initialized, Stk, Heap, Live, Vst);
 vi({deallocate,StkSize}, #vst{current=#st{numy=StkSize}}=Vst) ->
     verify_no_ct(Vst),
     deallocate(Vst);
@@ -704,19 +696,6 @@ vi({call_fun,Live}, Vst) ->
                                          Fun, SuccVst0),
                    validate_body_call('fun', Live+1, SuccVst)
            end);
-vi({make_fun2,{f,Lbl},_,_,NumFree}, #vst{ft=Ft}=Vst0) ->
-    #{ name := Name, arity := TotalArity } = map_get(Lbl, Ft),
-    Arity = TotalArity - NumFree,
-
-    true = Arity >= 0,                          %Assertion.
-
-    Vst = prune_x_regs(NumFree, Vst0),
-    verify_call_args(make_fun, NumFree, Vst),
-    verify_y_init(Vst),
-
-    Type = #t_fun{target={Name,TotalArity},arity=Arity},
-
-    create_term(Type, make_fun, [], {x,0}, Vst);
 vi({make_fun3,{f,Lbl},_,_,Dst,{list,Env}}, #vst{ft=Ft}=Vst0) ->
     _ = [assert_term(E, Vst0) || E <- Env],
     NumFree = length(Env),
@@ -1720,9 +1699,8 @@ validate_bs_match([I|Is], Ctx, Unit0, Vst0) ->
             Vst1 = update_bs_unit(Ctx, Unit, Vst0),
             Vst = update_type(fun meet/2, Type, Ctx, Vst1),
             validate_bs_match(Is, Ctx, Unit, Vst);
-        {ensure_exactly,Stride} ->
-            Vst = advance_bs_context(Ctx, Stride, Vst0),
-            validate_bs_match(Is, Ctx, Unit0, Vst);
+        {ensure_exactly,_Stride} ->
+            validate_bs_match(Is, Ctx, Unit0, Vst0);
         {'=:=',nil,Bits,Value} when Bits =< 64, is_integer(Value) ->
             validate_bs_match(Is, Ctx, Unit0, Vst0);
         {Type0,Live,{literal,Flags},Size,Unit,Dst} when Type0 =:= binary;

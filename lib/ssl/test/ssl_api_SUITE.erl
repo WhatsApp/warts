@@ -23,6 +23,7 @@
 
 -behaviour(ct_suite).
 
+-include("ssl_test_lib.hrl").
 -include_lib("common_test/include/ct.hrl").
 -include_lib("ssl/src/ssl_api.hrl").
 -include_lib("ssl/src/ssl_internal.hrl").
@@ -182,12 +183,16 @@
          server_options_negative_stateless_tickets_seed/1,
          invalid_options_tls13/0,
          invalid_options_tls13/1,
+         ssl_not_started/0,
+         ssl_not_started/1,
          cookie/0,
          cookie/1,
          check_random_nonce/0,
          check_random_nonce/1,
          cipher_listing/0,
-         cipher_listing/1
+         cipher_listing/1,
+         format_error/0,
+         format_error/1
         ]).
 
 %% Apply export
@@ -275,7 +280,8 @@ simple_api_tests() ->
      invalid_cacertfile,
      invalid_options,
      options_not_proplist,
-     options_whitebox
+     options_whitebox,
+     format_error
     ].
 
 
@@ -316,6 +322,7 @@ gen_api_tests() ->
      der_input,
      max_handshake_size,
      cb_info,
+     ssl_not_started,
      log_alert,
      getstat,
      check_random_nonce,
@@ -491,8 +498,7 @@ peercert(Config) when is_list(Config) ->
     ServerMsg = {error, no_peercert},
     ClientMsg = {ok, BinCert},
 
-    ct:log("Testcase ~p, Client ~p  Server ~p ~n",
-		       [self(), Client, Server]),
+    ?CT_LOG("Client ~p  Server ~p ~n", [Client, Server]),
 
     ssl_test_lib:check_result(Server, ServerMsg, Client, ClientMsg),
 
@@ -527,8 +533,7 @@ peercert_with_client_cert(Config) when is_list(Config) ->
     ServerMsg = {ok, ClientBinCert},
     ClientMsg = {ok, ServerBinCert},
 
-    ct:log("Testcase ~p, Client ~p  Server ~p ~n",
-		       [self(), Client, Server]),
+    ?CT_LOG("Client ~p  Server ~p ~n", [Client, Server]),
 
     ssl_test_lib:check_result(Server, ServerMsg, Client, ClientMsg),
 
@@ -615,8 +620,7 @@ connection_information(Config) when is_list(Config) ->
 			   {mfa, {?MODULE, connection_information_result, []}},
 			   {options, ClientOpts}]),
 
-    ct:log("Testcase ~p, Client ~p  Server ~p ~n",
-		       [self(), Client, Server]),
+    ?CT_LOG("Client ~p  Server ~p ~n", [Client, Server]),
 
     ssl_test_lib:check_result(Server, ok, Client, ok),
 
@@ -650,7 +654,7 @@ do_run_conn_info_srp_test(ErlangCipherSuite, Version, Config) ->
     ServerOpts = ssl_test_lib:ssl_options(SOpts, Config),
     ClientOpts = ssl_test_lib:ssl_options(COpts, Config),
 
-    ct:log("Erlang Cipher Suite is: ~p~n", [ErlangCipherSuite]),
+    ?CT_LOG("Erlang Cipher Suite is: ~p~n", [ErlangCipherSuite]),
 
     Server =
         ssl_test_lib:start_server([{node, ServerNode}, {port, 0},
@@ -696,8 +700,7 @@ secret_connection_info(Config) when is_list(Config) ->
                                    {mfa, {?MODULE, secret_connection_info_result, []}},
                                    {options,  [{verify, verify_peer} |ClientOpts]}]),
     
-    ct:log("Testcase ~p, Client ~p  Server ~p ~n",
-		       [self(), Client, Server]),
+    ?CT_LOG("Client ~p  Server ~p ~n", [Client, Server]),
 			   
     ssl_test_lib:check_result(Server, true, Client, true),
     
@@ -728,8 +731,7 @@ keylog_connection_info(Config, KeepSecrets) ->
                                    {mfa, {?MODULE, keylog_connection_info_result, [KeepSecrets]}},
                                    {options,  [{verify, verify_peer}, {keep_secrets, KeepSecrets} |ClientOpts]}]),
 
-    ct:log("Testcase ~p, KeepSecrets ~p Client ~p  Server ~p ~n",
-		       [self(), KeepSecrets, Client, Server]),
+    ?CT_LOG("KeepSecrets ~p Client ~p  Server ~p ~n", [KeepSecrets, Client, Server]),
 
     ServerKeylog = receive
                        {Server, {ok, Keylog}} ->
@@ -819,8 +821,7 @@ conf_signature_algs(Config) when is_list(Config) ->
 				   {options, [{active, false}, {signature_algs, [{sha256, rsa}]},
                                               {versions, ['tlsv1.2']} | ClientOpts]}]),
     
-    ct:log("Testcase ~p, Client ~p  Server ~p ~n",
-			 [self(), Client, Server]),
+    ?CT_LOG("Client ~p  Server ~p ~n", [Client, Server]),
     
     ssl_test_lib:check_result(Server, ok, Client, ok),
     
@@ -1082,7 +1083,7 @@ versions() ->
 
 versions(Config) when is_list(Config) -> 
     [_|_] = Versions = ssl:versions(),
-    ct:log("~p~n", [Versions]).
+    ?CT_LOG("~p~n", [Versions]).
 
 %%--------------------------------------------------------------------
 
@@ -1273,7 +1274,7 @@ hibernate_helper(Version, CheckServer, StartServerOpts, StartClientOpts,
                       ClientHibernateAfter}
         end,
     SleepAmount = max(1.5*HibernateAfter, 500),
-    ct:log("HibernateAfter = ~w SleepAmount = ~w", [HibernateAfter, SleepAmount]),
+    ?CT_LOG("HibernateAfter = ~w SleepAmount = ~w", [HibernateAfter, SleepAmount]),
     ct:sleep(SleepAmount), %% Schedule out
     {current_function, {erlang, hibernate, 3}} =
 	process_info(ReceiverPid, current_function),
@@ -1297,7 +1298,7 @@ listen_socket() ->
 listen_socket(Config) ->
     ServerOpts = ssl_test_lib:ssl_options(server_rsa_opts, Config),
     {ok, ListenSocket} = ssl:listen(0, ServerOpts),
-
+    Protocol = proplists:get_value(protocol, ServerOpts, tls),
     %% This can be a valid thing to do as
     %% options are inherited by the accept socket
     ok = ssl:controlling_process(ListenSocket, self()),
@@ -1311,8 +1312,12 @@ listen_socket(Config) ->
     {error, enotconn} = ssl:peercert(ListenSocket),
     {error, enotconn} = ssl:renegotiate(ListenSocket),
     {error, enotconn} = ssl:prf(ListenSocket, 'master_secret', <<"Label">>, [client_random], 256),
-    {error, enotconn} = ssl:shutdown(ListenSocket, read_write),
-
+    case Protocol of
+        tls ->
+            {error, enotconn} = ssl:shutdown(ListenSocket, read_write);
+        dtls ->
+            {error, notsup} = ssl:shutdown(ListenSocket, read_write)
+    end,
     ok = ssl:close(ListenSocket).
 
 %%--------------------------------------------------------------------
@@ -1337,8 +1342,7 @@ peername(Config) when is_list(Config) ->
                            {from, self()},
                            {options, ClientOpts}]),
 
-    ct:log("Testcase ~p, Client ~p  Server ~p ~n",
-           [self(), Client, Server]),
+    ?CT_LOG("Client ~p  Server ~p ~n", [Client, Server]),
 
     Server ! get_socket,
     SSocket =
@@ -1348,9 +1352,9 @@ peername(Config) when is_list(Config) ->
         end,
 
     {ok, ServerPeer} = ssl:peername(SSocket),
-    ct:log("Server's peer: ~p~n", [ServerPeer]),
+    ?CT_LOG("Server's peer: ~p~n", [ServerPeer]),
     {ok, ClientPeer} = ssl:peername(CSocket),
-    ct:log("Client's peer: ~p~n", [ClientPeer]),
+    ?CT_LOG("Client's peer: ~p~n", [ClientPeer]),
 
     ssl_test_lib:close(Server),
     ssl_test_lib:close(Client).
@@ -1534,8 +1538,7 @@ controlling_process(Config) when is_list(Config) ->
 							       ClientMsg]}},
 			   {options, ClientOpts}]),
     
-    ct:log("Testcase ~p, Client ~p  Server ~p ~n",
-           [self(), Client, Server]),
+    ?CT_LOG("Client ~p  Server ~p ~n", [Client, Server]),
     
     ServerMsg = ssl_test_lib:active_recv(CSocket, length(ServerMsg)),
     %% We do not have the TLS server socket but all messages form the client
@@ -1569,7 +1572,7 @@ controller_dies(Config) when is_list(Config) ->
 									    ClientMsg]}},
 					{options, ClientOpts}]),
 
-    ct:log("Testcase ~p, Client ~p  Server ~p ~n", [self(), Client, Server]),
+    ?CT_LOG("Client ~p  Server ~p ~n", [Client, Server]),
     ct:sleep(?SLEEP), %% so that they are connected
     
     process_flag(trap_exit, true),
@@ -1606,12 +1609,12 @@ controller_dies(Config) when is_list(Config) ->
 	    Client3 ! die_nice 
     end,
 
-    ct:log("Waiting on exit ~p~n",[Client3]),
+    ?CT_LOG("Waiting on exit ~p~n",[Client3]),
     receive {'EXIT', Client3, normal} -> ok end,
     
     receive   %% Client3 is dead but that doesn't matter, socket should not be closed.
 	Unexpected ->
-	    ct:log("Unexpected ~p~n",[Unexpected]),
+	    ?CT_LOG("Unexpected ~p~n",[Unexpected]),
 	    ct:fail({line, ?LINE-1})
     after 1000 ->
 	    ok
@@ -1864,8 +1867,7 @@ ipv6(Config) when is_list(Config) ->
 				   {options, 
 				    [inet6, {active, false} | ClientOpts]}]),
 	    
-	    ct:log("Testcase ~p, Client ~p  Server ~p ~n",
-			       [self(), Client, Server]),
+	    ?CT_LOG("Client ~p  Server ~p ~n", [Client, Server]),
 	    
 	    ssl_test_lib:check_result(Server, ok, Client, ok),
 	    
@@ -1889,7 +1891,7 @@ der_input(Config) when is_list(Config) ->
     [CADb | _] = element(5, State),
     ct:sleep(?SLEEP*2), %%Make sure there is no outstanding clean cert db msg in manager
     Size = ets:info(CADb, size),
-    ct:pal("Size ~p", [Size]),
+    ?CT_LOG("Size ~p", [Size]),
 
     SeverVerifyOpts = ssl_test_lib:ssl_options(server_rsa_opts, Config),
     {ServerCert, ServerKey, ServerCaCerts, DHParams} = der_input_opts([{dhfile, DHParamFile} |
@@ -2069,8 +2071,7 @@ new_options_in_handshake(Config) when is_list(Config) ->
 					{mfa, {?MODULE, connection_info_result, []}},
 					{options, [{ciphers, Ciphers} | ClientOpts]}]),
     
-    ct:log("Testcase ~p, Client ~p  Server ~p ~n",
-		       [self(), Client, Server]),
+    ?CT_LOG("Client ~p  Server ~p ~n", [Client, Server]),
 
     ServerMsg = ClientMsg = {ok, {Version, Cipher}},
    
@@ -2218,26 +2219,26 @@ customize_defaults(Opts, Role, Host) ->
                     {ok, #config{ssl=EXP = __ALL}} ->
                         ShouldBeMissing = ShouldBeMissing -- maps:keys(__ALL);
                     Other ->
-                        ct:pal("ssl:handle_options(~0p,~0p,~0p).",[__Opts,Role,Host]),
+                        ?CT_PAL("ssl:handle_options(~0p,~0p,~0p).",[__Opts,Role,Host]),
                         error({unexpected, Other})
                 catch
                     throw:{error,{options,{insufficient_crypto_support,{'tlsv1.3',_}}}} -> ignored;
                     C:Other:ST ->
-                        ct:pal("ssl:handle_options(~0p,~0p,~0p).",[__Opts,Role,Host]),
+                        ?CT_PAL("ssl:handle_options(~0p,~0p,~0p).",[__Opts,Role,Host]),
                         error({unexpected, C, Other,ST})
                 end,
                 try ssl:update_options(__Opts, Role, __DefOpts) of
                     EXP = __ALL2 ->
                         ShouldBeMissing = ShouldBeMissing -- maps:keys(__ALL2);
                     Other2 ->
-                        ct:pal("{ok,Cfg} = ssl:handle_options([],~p,~p),"
+                        ?CT_PAL("{ok,Cfg} = ssl:handle_options([],~p,~p),"
                                "ssl:update_options(~w,~w, element(2,Cfg)).",
                                [Role,Host,__Opts,Role]),
                         error({unexpected2, Other2})
                 catch
                     throw:{error,{options,{insufficient_crypto_support,{'tlsv1.3',_}}}} -> ignored;
                     C2:Other2:ST2 ->
-                        ct:pal("{ok,Cfg} = ssl:handle_options([],~p,~p),"
+                        ?CT_PAL("{ok,Cfg} = ssl:handle_options([],~p,~p),"
                                "ssl:update_options(~p,~p, element(2,Cfg)).",
                                [Role,Host,__Opts,Role]),
                         error({unexpected, C2, Other2, ST2})
@@ -2250,19 +2251,19 @@ customize_defaults(Opts, Role, Host) ->
                 {__DefOpts, __Opts} = customize_defaults(Opts, Role, Host),
                 try ssl:handle_options(__Opts, Role, Host) of
                     Other ->
-                        ct:pal("ssl:handle_options(~0p,~0p,~0p).",[__Opts,Role,Host]),
+                        ?CT_PAL("ssl:handle_options(~0p,~0p,~0p).",[__Opts,Role,Host]),
                         error({unexpected, Other})
                 catch
                     throw:{error,{options,{insufficient_crypto_support,{'tlsv1.3',_}}}} -> ignored;
                     throw:{error, {options, EXP}} -> ok;
                     throw:{error, EXP} -> ok;
                     C:Other:ST ->
-                        ct:pal("ssl:handle_options(~0p,~0p,~0p).",[__Opts,Role,Host]),
+                        ?CT_PAL("ssl:handle_options(~0p,~0p,~0p).",[__Opts,Role,Host]),
                         error({unexpected, C, Other,ST})
                 end,
                 try ssl:update_options(__Opts, Role, __DefOpts) of
                     Other2 ->
-                        ct:pal("{ok,Cfg} = ssl:handle_options([],~p,~p),"
+                        ?CT_PAL("{ok,Cfg} = ssl:handle_options([],~p,~p),"
                                "ssl:update_options(~p,~p, element(2,Cfg)).",
                                [Role,Host,__Opts,Role]),
                         error({unexpected, Other2})
@@ -2271,7 +2272,7 @@ customize_defaults(Opts, Role, Host) ->
                     throw:{error, {options, EXP}} -> ok;
                     throw:{error, EXP} -> ok;
                     C2:Other2:ST2 ->
-                        ct:pal("{ok,Cfg} = ssl:handle_options([],~p,~p),"
+                        ?CT_PAL("{ok,Cfg} = ssl:handle_options([],~p,~p),"
                                "ssl:update_options(~p,~p, element(2,Cfg)).",
                                [Role,Host,__Opts,Role]),
                         error({unexpected, C2, Other2,ST2})
@@ -3496,6 +3497,23 @@ invalid_options_tls13(Config) when is_list(Config) ->
           end,
     [Fun(Option, ErrorMsg, Type) || {Option, ErrorMsg, Type} <- TestOpts].
 
+
+ssl_not_started() ->
+    [{doc, "Test that an error is returned if ssl is not started"}].
+ssl_not_started(Config) when is_list(Config) ->
+    application:stop(ssl),
+    Protocol = proplists:get_value(protocol, Config, tls),
+    Version = proplists:get_value(version, Config),
+    Opts = [{verify, verify_none},
+            {versions, [Version]},
+            {protocol, Protocol}],
+    try
+        {error, ssl_not_started} = ssl:connect("localhost", 22, Opts)
+    after
+        ssl:start()
+    end,
+    ok.
+
 cookie() ->
     [{doc, "Test cookie extension in TLS 1.3"}].
 cookie(Config) when is_list(Config) ->
@@ -3545,6 +3563,34 @@ cipher_listing(Config) when is_list(Config) ->
     Version = ssl_test_lib:protocol_version(Config, tuple),
     length_exclusive(Version) == length_all(Version).
 
+format_error() ->
+    "".
+format_error(Config) when is_list(Config) ->
+    Errors = [{error, enotconn},
+              {error, closed},
+              {options, {keyfile, "TestFileName", {error,enoent}}},
+              {options, {certfile, "TestFileName", {error,enoent}}},
+              {options, {cacertfile, "TestFileName",{error,enoent}}},
+              {options, {option_not_a_key_value_tuple, [foo]}},
+              {options, {insufficient_crypto_support,{'tlsv1.3','tlsv1.1'}}},
+              {options, incompatible, [{verify,verify_peer},{cacerts,undefined}]},
+              {options, {protocol, foo}},
+              {option, server_only, alpn_preferred_protocols},
+              {options, {alpn_advertised_protocols, undefined}},
+              {options, missing_version, {'tlsv1.2',{versions, ['tlsv1.1','tlsv1.3']}}},
+              {options, {no_supported_algorithms, {signature_algs,[]}}},
+              {options, {no_supported_signature_schemes, {signature_algs_cert,[]}}}
+             ],
+    Check = fun(Err) ->
+                    Str = ssl:format_error(Err),
+                    io:format("~p => ~s ~n", [Err, Str]),
+                    %% Verify flat string (why do ssl flatten strings?)
+                    Str = [C || C <- Str, is_integer(C)]
+            end,
+    [Check(Err) || Err <- Errors],
+    ok.
+
+
 %%--------------------------------------------------------------------
 
 establish_connection(Id, ServerNode, ServerOpts, ClientNode, ClientOpts, Hostname) ->
@@ -3564,8 +3610,7 @@ establish_connection(Id, ServerNode, ServerOpts, ClientNode, ClientOpts, Hostnam
                                           [Id, client_random]}},
                                    {options,  [{verify, verify_peer} |ClientOpts]}]),
 
-    ct:log("Testcase ~p, Client ~p  Server ~p ~n",
-           [self(), Client, Server]),
+    ?CT_LOG("Client ~p  Server ~p ~n", [Client, Server]),
     {Server, Client}.
 
 %%% Checker functions
@@ -3581,7 +3626,7 @@ connection_information_result(Socket) ->
     case  length(Info) > 3 of
 	true -> 
 	    %% At least one ssl_option() is set
-	    ct:log("Info ~p", [Info]),
+	    ?CT_LOG("Info ~p", [Info]),
 	    ok;
 	false ->
 	    ct:fail(no_ssl_options_returned)
@@ -3601,18 +3646,16 @@ check_keylog_info('tlsv1.3', [{keylog, ["CLIENT_HANDSHAKE_TRAFFIC_SECRET"++_,_|_
     {ok, Keylog};
 check_keylog_info('tlsv1.3', []=Keylog, false) ->
     {ok, Keylog};
-check_keylog_info('tlsv1.2', [{keylog, ["CLIENT_RANDOM"++_]=Keylog}], _) ->
+check_keylog_info(_, [{keylog, ["CLIENT_RANDOM"++_]=Keylog}], _) ->
     {ok, Keylog};
-check_keylog_info(NotSup, [], _) when NotSup == 'tlsv1.1'; NotSup == tlsv1; NotSup == 'dtlsv1.2'; NotSup == dtlsv1 ->
-    {ok, []};
-check_keylog_info(_, Unexpected, _) ->
-    {unexpected, Unexpected}.
+check_keylog_info(_, Unexpected, Keep) ->
+    {unexpected, Keep, Unexpected}.
 
 check_srp_in_connection_information(_Socket, _Username, client) ->
     ok;
 check_srp_in_connection_information(Socket, Username, server) ->
     {ok, Info} = ssl:connection_information(Socket),
-    ct:log("Info ~p~n", [Info]),
+    ?CT_LOG("Info ~p~n", [Info]),
     case proplists:get_value(srp_username, Info, not_found) of
         Username ->
 	        ok;
@@ -3667,6 +3710,10 @@ controlling_process_result(Socket, Pid, Msg) ->
 controller_dies_result(_Socket, _Pid, _Msg) ->
     receive Result -> Result end.
 send_recv_result_timeout_client(Socket) ->
+    try ssl:recv(Socket, 11, not_infinity) catch error : function_clause -> ok end,
+    try ssl:recv(Socket, 11, -1) catch error : function_clause -> ok end,
+    try ssl:recv(Socket, not_integer, 500) catch error : function_clause -> ok end,
+    try ssl:recv(Socket, -1, 500) catch error : function_clause -> ok end,
     {error, timeout} = ssl:recv(Socket, 11, 500),
     {error, timeout} = ssl:recv(Socket, 11, 0),
     ssl:send(Socket, "Hello world"),
@@ -3753,7 +3800,7 @@ prf_create_plan(TlsVer, PRFs, Results) when TlsVer == 'tlsv1.2' orelse TlsVer ==
               Ciphers = prf_get_ciphers(TlsVer, PRF),
               case Ciphers of
                   [] ->
-                      ct:log("No ciphers for PRF algorithm ~p. Skipping.", [PRF]),
+                      ?CT_LOG("No ciphers for PRF algorithm ~p. Skipping.", [PRF]),
                       Acc;
                   Ciphers ->
                       {_, Expected} = lists:keyfind(PRF, 1, Results),
@@ -3867,15 +3914,15 @@ get_close(Pid, Where) ->
 	{'EXIT', Pid, _Reason} ->
 	    receive
 		{_, {ssl_closed, Socket}} ->
-		    ct:log("Socket closed ~p~n",[Socket]);
+		    ?CT_LOG("Socket closed ~p~n",[Socket]);
 		Unexpected ->
-		    ct:log("Unexpected ~p~n",[Unexpected]),
+		    ?CT_LOG("Unexpected ~p~n",[Unexpected]),
 		    ct:fail({line, ?LINE-1})
 	    after 5000 ->
 		    ct:fail({timeout, {line, ?LINE, Where}})
 	    end;
 	Unexpected ->
-	    ct:log("Unexpected ~p~n",[Unexpected]),
+	    ?CT_LOG("Unexpected ~p~n",[Unexpected]),
 	    ct:fail({line, ?LINE-1})
     after 5000 ->
 	    ct:fail({timeout, {line, ?LINE, Where}})
@@ -3958,7 +4005,7 @@ start_client_negative(Config, Options, Error) ->
                                         {return_error, econnrefused},
 					{mfa, {?MODULE, connection_info_result, []}},
 					{options, Options ++ ClientOpts}]),
-    ct:pal("Actual: ~p~nExpected: ~p", [Client, {connect_failed, Error}]),
+    ?CT_LOG("Actual: ~p~nExpected: ~p", [Client, {connect_failed, Error}]),
     {connect_failed, Error} = Client.
 
 start_server_negative(Config, Options, Error) ->
@@ -3969,7 +4016,7 @@ start_server_negative(Config, Options, Error) ->
 					{mfa, {?MODULE, connection_info_result, []}},
 					{options,  Options ++ ServerOpts}]),
 
-    ct:pal("Actual: ~p~nExpected: ~p", [Server,Error]),
+    ?CT_LOG("Actual: ~p~nExpected: ~p", [Server,Error]),
     Error = Server.
 
 der_input_opts(Opts) ->

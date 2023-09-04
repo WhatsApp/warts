@@ -70,13 +70,13 @@
 
 %% Cipher suites handling
 -export([available_suites/2, available_signature_algs/2,  available_signature_algs/3,
-         cipher_suites/3, prf/6, select_session/9,
+         cipher_suites/3, prf/6, select_session/8,
          premaster_secret/2, premaster_secret/3, premaster_secret/4]).
 
 %% Extensions handling
 -export([client_hello_extensions/10,
 	 handle_client_hello_extensions/10, %% Returns server hello extensions
-	 handle_server_hello_extensions/10, select_curve/2, select_curve/3,
+	 handle_server_hello_extensions/9, select_curve/2, select_curve/3,
          select_hashsign/4, select_hashsign/5,
 	 select_hashsign_algs/3, empty_extensions/2, add_server_share/3,
 	 add_alpn/2, add_selected_version/1, decode_alpn/1, max_frag_enum/1
@@ -115,8 +115,6 @@ server_hello(SessionId, Version, ConnectionStates, Extensions) ->
 	ssl_record:pending_connection_state(ConnectionStates, read),
     #server_hello{server_version = Version,
 		  cipher_suite = SecParams#security_parameters.cipher_suite,
-                  compression_method =
-		  SecParams#security_parameters.compression_algorithm,
 		  random = SecParams#security_parameters.server_random,
 		  session_id = SessionId,
 		  extensions = Extensions
@@ -544,14 +542,13 @@ encode_handshake(#server_hello{server_version = ServerVersion,
 			       random = Random,
 			       session_id = Session_ID,
 			       cipher_suite = CipherSuite,
-			       compression_method = Comp_method,
 			       extensions = Extensions}, _Version) ->
 			SID_length = byte_size(Session_ID),
     {Major,Minor} = ServerVersion,
     ExtensionsBin = encode_hello_extensions(Extensions),
     {?SERVER_HELLO, <<?BYTE(Major), ?BYTE(Minor), Random:32/binary,
-		     ?BYTE(SID_length), Session_ID/binary,
-                     CipherSuite/binary, ?BYTE(Comp_method), ExtensionsBin/binary>>};
+                      ?BYTE(SID_length), Session_ID/binary,
+                      CipherSuite/binary, ?BYTE(?NO_COMPRESSION), ExtensionsBin/binary>>};
 encode_handshake(#certificate{asn1_certificates = ASN1CertList}, _Version) ->
     ASN1Certs = certs_from_list(ASN1CertList),
     ACLen = erlang:iolist_size(ASN1Certs),
@@ -850,28 +847,26 @@ decode_handshake(_, ?NEXT_PROTOCOL, <<?BYTE(SelectedProtocolLength),
     #next_protocol{selected_protocol = SelectedProtocol};
 
 decode_handshake(Version, ?SERVER_HELLO, <<?BYTE(Major), ?BYTE(Minor), Random:32/binary,
-					    ?BYTE(SID_length), Session_ID:SID_length/binary,
-					    Cipher_suite:2/binary, ?BYTE(Comp_method)>>) ->
+                                           ?BYTE(SID_length), Session_ID:SID_length/binary,
+                                           Cipher_suite:2/binary, ?BYTE(?NO_COMPRESSION)>>) ->
     #server_hello{
        server_version = {Major,Minor},
        random = Random,
        session_id = Session_ID,
        cipher_suite = Cipher_suite,
-       compression_method = Comp_method,
        extensions = empty_extensions(Version, server_hello)};
 
-decode_handshake(Version, ?SERVER_HELLO, <<?BYTE(Major), ?BYTE(Minor), Random:32/binary,
-		       ?BYTE(SID_length), Session_ID:SID_length/binary,
-		       Cipher_suite:2/binary, ?BYTE(Comp_method),
-		       ?UINT16(ExtLen), Extensions:ExtLen/binary>>) ->
+decode_handshake(Version, ?SERVER_HELLO,
+                 <<?BYTE(Major), ?BYTE(Minor), Random:32/binary,
+                   ?BYTE(SID_length), Session_ID:SID_length/binary,
+                   Cipher_suite:2/binary, ?BYTE(?NO_COMPRESSION),
+                   ?UINT16(ExtLen), Extensions:ExtLen/binary>>) ->
     HelloExtensions = decode_hello_extensions(Extensions, Version, {Major, Minor}, server_hello),
-
     #server_hello{
        server_version = {Major,Minor},
        random = Random,
        session_id = Session_ID,
        cipher_suite = Cipher_suite,
-       compression_method = Comp_method,
        extensions = HelloExtensions};
 decode_handshake(_Version, ?CERTIFICATE, <<?UINT24(ACLen), ASN1Certs:ACLen/binary>>) ->
     #certificate{asn1_certificates = certs_to_list(ASN1Certs)};
@@ -1064,7 +1059,8 @@ prf(Version, PRFAlgo, Secret, Label, Seed, WantedLength)
   when ?TLS_1_X(Version)->
     {ok, tls_v1:prf(PRFAlgo, Secret, Label, Seed, WantedLength)}.
 
-select_session(SuggestedSessionId, CipherSuites, HashSigns, Compressions, SessIdTracker, Session0, Version, SslOpts, CertKeyAlts) ->
+select_session(SuggestedSessionId, CipherSuites, HashSigns, SessIdTracker, Session0,
+               Version, SslOpts, CertKeyAlts) ->
     CertKeyPairs = ssl_certificate:available_cert_key_pairs(CertKeyAlts, Version),
     {SessionId, Resumed} = ssl_session:server_select_session(Version, SessIdTracker, SuggestedSessionId,
                                                              SslOpts, CertKeyPairs),
@@ -1072,25 +1068,22 @@ select_session(SuggestedSessionId, CipherSuites, HashSigns, Compressions, SessId
         undefined ->
             %% Select Cert
             Session = new_session_parameters(SessionId, Session0, CipherSuites,
-                                             SslOpts, Version, Compressions,
-                                             HashSigns, CertKeyPairs),
+                                             SslOpts, Version, HashSigns, CertKeyPairs),
 	    {new, Session};
 	_ ->
 	    {resumed, Resumed}
     end.
 
-
 new_session_parameters(SessionId, #session{ecc = ECCCurve0} = Session, CipherSuites, SslOpts,
-                       Version, Compressions, HashSigns, CertKeyPairs) ->
-    Compression = select_compression(Compressions),
-    {Certs, Key, {ECCCurve, CipherSuite}} = server_select_cert_key_pair_and_params(CipherSuites, CertKeyPairs, HashSigns,
-                                                                            ECCCurve0, SslOpts, Version),
+                       Version, HashSigns, CertKeyPairs) ->
+    {Certs, Key, {ECCCurve, CipherSuite}} =
+        server_select_cert_key_pair_and_params(CipherSuites, CertKeyPairs, HashSigns,
+                                               ECCCurve0, SslOpts, Version),
     Session#session{session_id = SessionId,
                     ecc = ECCCurve,
                     own_certificates = Certs,
                     private_key = Key,
-                    cipher_suite = CipherSuite,
-                    compression_method = Compression}.
+                    cipher_suite = CipherSuite}.
 
 %% Possibly support part of "trusted_ca_keys" extension that corresponds to TLS-1.3 certificate_authorities?!
 
@@ -1473,15 +1466,14 @@ handle_client_hello_extensions(RecordCB, Random, ClientCipherSuites,
                                Exts, Version,
 			       #{secure_renegotiate := SecureRenegotation,
                                  alpn_preferred_protocols := ALPNPreferredProtocols} = Opts,
-			       #session{cipher_suite = NegotiatedCipherSuite,
-					compression_method = Compression} = Session0,
+			       #session{cipher_suite = NegotiatedCipherSuite} = Session0,
 			       ConnectionStates0, Renegotiation, IsResumed) ->
     Session = handle_srp_extension(maps:get(srp, Exts, undefined), Session0),
     MaxFragEnum = handle_mfl_extension(maps:get(max_frag_enum, Exts, undefined)),
     ConnectionStates1 = ssl_record:set_max_fragment_length(MaxFragEnum, ConnectionStates0),
     ConnectionStates = handle_renegotiation_extension(server, RecordCB, Version, maps:get(renegotiation_info, Exts, undefined),
 						      Random, NegotiatedCipherSuite, 
-						      ClientCipherSuites, Compression,
+						      ClientCipherSuites,
 						      ConnectionStates1, Renegotiation, SecureRenegotation),
 
     Empty = empty_extensions(Version, server_hello),
@@ -1515,7 +1507,7 @@ handle_client_hello_extensions(RecordCB, Random, ClientCipherSuites,
                                         encode_protocols_advertised_on_server(ProtocolsToAdvertise)}}
     end.
 
-handle_server_hello_extensions(RecordCB, Random, CipherSuite, Compression,
+handle_server_hello_extensions(RecordCB, Random, CipherSuite,
                                Exts, Version,
 			       #{secure_renegotiate := SecureRenegotation} =
                                    SslOpts,
@@ -1523,7 +1515,7 @@ handle_server_hello_extensions(RecordCB, Random, CipherSuite, Compression,
     ConnectionStates = handle_renegotiation_extension(client, RecordCB, Version,  
                                                       maps:get(renegotiation_info, Exts, undefined), Random, 
 						      CipherSuite, undefined,
-						      Compression, ConnectionStates0,
+						      ConnectionStates0,
 						      Renegotiation, SecureRenegotation),
 
     %% RFC 6066: handle received/expected maximum fragment length
@@ -1626,7 +1618,7 @@ select_hashsign({ClientHashSigns, ClientSignatureSchemes},
 select_hashsign({#hash_sign_algos{hash_sign_algos = ClientHashSigns},
                  ClientSignatureSchemes0},
                 Cert, KeyExAlgo, SupportedHashSigns, ?TLS_1_2) ->
-    ClientSignatureSchemes = get_signature_scheme(ClientSignatureSchemes0),
+    ClientSignatureSchemes = client_signature_schemes(ClientHashSigns, ClientSignatureSchemes0),
     {SignAlgo0, Param, PublicKeyAlgo0, _, _} = get_cert_params(Cert),
     SignAlgo = sign_algo(SignAlgo0, Param),
     PublicKeyAlgo = ssl_certificate:public_key_type(PublicKeyAlgo0),
@@ -1647,7 +1639,7 @@ select_hashsign({#hash_sign_algos{hash_sign_algos = ClientHashSigns},
     %% If no "signature_algorithms_cert" extension is
     %% present, then the "signature_algorithms" extension also applies to
     %% signatures appearing in certificates.
-    case is_supported_sign(SignAlgo, Param, ClientHashSigns, ClientSignatureSchemes) of
+    case is_supported_sign(SignAlgo, ClientSignatureSchemes) of
         true ->
             case
                 (KeyExAlgo == psk) orelse
@@ -1657,9 +1649,9 @@ select_hashsign({#hash_sign_algos{hash_sign_algos = ClientHashSigns},
                 (KeyExAlgo == dh_anon) orelse
                 (KeyExAlgo == ecdhe_anon) of
                 true ->
-                    ClientHashSigns;
+                    ClientSignatureSchemes;
                 false ->
-                    do_select_hashsign(ClientHashSigns, PublicKeyAlgo, SupportedHashSigns)
+                    do_select_hashsign(ClientSignatureSchemes, PublicKeyAlgo, SupportedHashSigns)
             end;
         false ->
             ?ALERT_REC(?FATAL, ?INSUFFICIENT_SECURITY, no_suitable_signature_algorithm)
@@ -1684,11 +1676,10 @@ select_hashsign(#certificate_request{
                 SupportedHashSigns,
 		?TLS_1_2) ->
     {SignAlgo0, Param, PublicKeyAlgo0, _, _} = get_cert_params(Cert),
-    SignAlgo = {_, KeyType} = sign_algo(SignAlgo0, Param),
+    SignAlgo = sign_algo(SignAlgo0, Param),
     PublicKeyAlgo = ssl_certificate:public_key_type(PublicKeyAlgo0),
-    SignatureSchemes = [Scheme  || Scheme <- HashSigns, is_atom(Scheme), (KeyType == rsa_pss_pss) or (KeyType == rsa)],
     case is_acceptable_cert_type(PublicKeyAlgo, Types) andalso
-        is_supported_sign(SignAlgo, Param, HashSigns, SignatureSchemes) of
+        is_supported_sign(SignAlgo, HashSigns) of
 	true ->
             do_select_hashsign(HashSigns, PublicKeyAlgo, SupportedHashSigns);
 	false ->
@@ -1706,25 +1697,55 @@ select_hashsign(#certificate_request{certificate_types = Types}, Cert, _, Versio
             ?ALERT_REC(?FATAL, ?INSUFFICIENT_SECURITY, no_suitable_signature_algorithm)
     end.
 
-
 do_select_hashsign(HashSigns, PublicKeyAlgo, SupportedHashSigns) ->
-    case lists:filter(fun({H, rsa_pss_pss = S} = Algos) when S == PublicKeyAlgo ->
-                              is_acceptable_hash_sign(list_to_existing_atom(atom_to_list(S) ++ "_" ++ atom_to_list(H)), SupportedHashSigns) orelse
-                                  is_acceptable_hash_sign(Algos, SupportedHashSigns);
-                         ({H, rsa_pss_rsae = S} = Algos) when PublicKeyAlgo == rsa ->
-                              is_acceptable_hash_sign(list_to_existing_atom(atom_to_list(S) ++ "_" ++ atom_to_list(H)), SupportedHashSigns) orelse
-                                  is_acceptable_hash_sign(Algos, SupportedHashSigns);
-                         ({_, S} = Algos) when S == PublicKeyAlgo ->
-                              is_acceptable_hash_sign(Algos, SupportedHashSigns);
-                         (_A)  ->
-                              false
-                      end, HashSigns) of
+    TLS12Scheme = 
+        fun(Scheme) ->
+                {H, S, _} = ssl_cipher:scheme_to_components(Scheme),
+                case S of
+                    rsa_pkcs1 when PublicKeyAlgo == rsa ->
+                        is_acceptable_hash_sign({H, rsa}, SupportedHashSigns) %% TLS-1.2 name
+                            orelse is_acceptable_hash_sign(Scheme, SupportedHashSigns); %% TLS-1.3 legacy name
+                    rsa_pss_rsae when PublicKeyAlgo == rsa  -> %% Backported
+                        is_acceptable_hash_sign(Scheme, SupportedHashSigns);
+                    rsa_pss_pss when PublicKeyAlgo  == rsa_pss_pss -> %% Backported
+                        is_acceptable_hash_sign(Scheme, SupportedHashSigns);
+                              ecdsa when (PublicKeyAlgo == ecdsa) andalso (H == sha) ->
+                        is_acceptable_hash_sign({H, S}, SupportedHashSigns) orelse  %% TLS-1.2 name
+                            is_acceptable_hash_sign(Scheme, SupportedHashSigns); %% TLS-1.3 legacy name
+                              _ ->
+                        false
+                end
+        end,
+
+    case lists:filter(
+           fun({H, rsa_pss_pss = S} = Algos) when S == PublicKeyAlgo -> 
+                   %% Backported from TLS-1.3, but only TLS-1.2 configured
+                   is_acceptable_hash_sign(list_to_existing_atom(atom_to_list(S) ++ "_" ++ atom_to_list(H)), 
+                                           SupportedHashSigns) orelse 
+                       is_acceptable_hash_sign(Algos, SupportedHashSigns);
+              ({H, rsa_pss_rsae = S} = Algos) when PublicKeyAlgo == rsa -> 
+                   %% Backported from TLS-1.3, but only TLS-1.2 configured
+                   is_acceptable_hash_sign(list_to_existing_atom(atom_to_list(S) ++ "_" ++ atom_to_list(H)), 
+                                           SupportedHashSigns) orelse
+                       is_acceptable_hash_sign(Algos, SupportedHashSigns);
+              ({_, S} = Algos) when S == PublicKeyAlgo ->
+                   is_acceptable_hash_sign(Algos, SupportedHashSigns);
+              %% Backported or legacy schemes from TLS-1.3 (TLS-1.2 negotiated when TLS-1.3 supported)
+              (Scheme) when is_atom(Scheme) ->
+                   TLS12Scheme(Scheme);
+              (_) ->
+                   false
+           end, HashSigns) of
         [] ->
             ?ALERT_REC(?FATAL, ?INSUFFICIENT_SECURITY, no_suitable_signature_algorithm);
         [HashSign | _] ->
-            HashSign
+            case ssl_cipher:scheme_to_components(HashSign) of
+                {Hash, rsa_pkcs1, _} ->
+                    {Hash, rsa};
+                {Hash, Sign, _} ->
+                    {Hash, Sign}
+            end
     end.
-
 
 %% Gets the relevant parameters of a certificate:
 %% - signature algorithm
@@ -1845,10 +1866,10 @@ select_own_cert([OwnCert| _]) ->
 select_own_cert(undefined) ->
     undefined.
 
-get_signature_scheme(undefined) ->
-    [];
-get_signature_scheme(#signature_algorithms_cert{
-                        signature_scheme_list = ClientSignatureSchemes}) ->
+client_signature_schemes(ClientHashSigns, undefined) ->
+    ClientHashSigns;
+client_signature_schemes(_, #signature_algorithms_cert{
+                               signature_scheme_list = ClientSignatureSchemes}) ->
     ClientSignatureSchemes.
 
 
@@ -2347,7 +2368,7 @@ calc_master_secret(Version, PrfAlgo, PremasterSecret, ClientRandom, ServerRandom
 %% hello messages
 %% NOTE : Role is the role of the receiver of the hello message
 %%        currently being processed.
-hello_pending_connection_states(_RecordCB, Role, Version, CipherSuite, Random, Compression,
+hello_pending_connection_states(_RecordCB, Role, Version, CipherSuite, Random,
 				 ConnectionStates) ->
     ReadState =
 	ssl_record:pending_connection_state(ConnectionStates, read),
@@ -2355,35 +2376,26 @@ hello_pending_connection_states(_RecordCB, Role, Version, CipherSuite, Random, C
 	ssl_record:pending_connection_state(ConnectionStates, write),
 
     NewReadSecParams =
-	hello_security_parameters(Role, Version, ReadState, CipherSuite,
-			    Random, Compression),
-
+	hello_security_parameters(Role, Version, ReadState, CipherSuite, Random),
+    
     NewWriteSecParams =
-	hello_security_parameters(Role, Version, WriteState, CipherSuite,
-			    Random, Compression),
+	hello_security_parameters(Role, Version, WriteState, CipherSuite, Random),
 
     ssl_record:set_security_params(NewReadSecParams,
 				    NewWriteSecParams,
 				    ConnectionStates).
 
-hello_security_parameters(client, Version, #{security_parameters := SecParams}, CipherSuite, Random,
-			  Compression) ->
+hello_security_parameters(client, Version, #{security_parameters := SecParams},
+                          CipherSuite, Random) ->
     NewSecParams = ssl_cipher:security_parameters(Version, CipherSuite, SecParams),
-    NewSecParams#security_parameters{
-      server_random = Random,
-      compression_algorithm = Compression
-     };
+    NewSecParams#security_parameters{server_random = Random};
 
-hello_security_parameters(server, Version, #{security_parameters := SecParams}, CipherSuite, Random,
-			  Compression) ->
+hello_security_parameters(server, Version, #{security_parameters := SecParams},
+                          CipherSuite, Random) ->
     NewSecParams = ssl_cipher:security_parameters(Version, CipherSuite, SecParams),
     NewSecParams#security_parameters{
-      client_random = Random,
-      compression_algorithm = Compression
+      client_random = Random
      }.
-
-select_compression(_CompressionMetodes) ->
-    ?NULL.
 
 do_select_version(_, ClientVersion, []) ->
     ClientVersion;
@@ -3384,7 +3396,7 @@ filter_unavailable_ecc_suites(_, Suites) ->
 %%-------------Extension handling --------------------------------
 
 handle_renegotiation_extension(Role, RecordCB, Version, Info, Random, NegotiatedCipherSuite, 
-			       ClientCipherSuites, Compression,
+			       ClientCipherSuites,
 			       ConnectionStates0, Renegotiation, SecureRenegotation) ->
     {ok, ConnectionStates} = handle_renegotiation_info(Version, RecordCB, Role, Info, ConnectionStates0,
                                                        Renegotiation, SecureRenegotation,
@@ -3393,7 +3405,6 @@ handle_renegotiation_extension(Role, RecordCB, Version, Info, Random, Negotiated
                                     Version,
                                     NegotiatedCipherSuite,
                                     Random,
-                                    Compression,
                                     ConnectionStates).
 
 %% Receive protocols, choose one from the list, return it.
@@ -3470,9 +3481,6 @@ is_acceptable_hash_sign(Algos, SupportedHashSigns) ->
 is_acceptable_cert_type(Sign, Types) ->
     lists:member(sign_type(Sign), binary_to_list(Types)).
 
-%% signature_algorithms_cert = undefined
-is_supported_sign(SignAlgo, _, HashSigns, []) ->
-    ssl_cipher:is_supported_sign(SignAlgo, HashSigns);
 %% {'SignatureAlgorithm',{1,2,840,113549,1,1,11},'NULL'}
 %% TODO: Implement validation for the curve used in the signature
 %% RFC 3279 - 2.2.3 ECDSA Signature Algorithm
@@ -3484,13 +3492,17 @@ is_supported_sign(SignAlgo, _, HashSigns, []) ->
 %% The elliptic curve parameters in the subjectPublicKeyInfo field of
 %% the certificate of the issuer SHALL apply to the verification of the
 %% signature.
-is_supported_sign({Hash, Sign}, _Param, _, SignatureSchemes) ->
+is_supported_sign({Hash, Sign}, SignatureSchemes) ->
     Fun = fun (Scheme) ->
                   {H, S0, _} = ssl_cipher:scheme_to_components(Scheme),
                   S1 = case S0 of
-                             rsa_pkcs1 -> rsa;
-                             S -> S
-                         end,
+                           rsa_pkcs1 ->
+                               rsa;
+                           rsa_pss_rsae ->
+                               rsa; 
+                           S ->
+                               S
+                       end,
                   (Sign  =:= S1) andalso (Hash  =:= H)
           end,
     lists:any(Fun, SignatureSchemes).

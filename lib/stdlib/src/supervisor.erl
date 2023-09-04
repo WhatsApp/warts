@@ -716,6 +716,8 @@ handle_start_child(Child, State) ->
 		    {{ok, Pid}, save_child(Child#child{pid = Pid}, State)};
 		{ok, Pid, Extra} ->
 		    {{ok, Pid, Extra}, save_child(Child#child{pid = Pid}, State)};
+		{error, {already_started, _Pid} = What} ->
+		    {{error, What}, State};
 		{error, What} ->
 		    {{error, {What, Child}}, State}
 	    end;
@@ -1532,9 +1534,9 @@ add_restart(State) ->
     end.
 
 add_restart(Restarts0, Now, Period) ->
-    Treshold = Now - Period,
+    Threshold = Now - Period,
     Restarts1 = lists:takewhile(
-                  fun (R) -> R >= Treshold end,
+                  fun (R) -> R >= Threshold end,
                   Restarts0
                  ),
     [Now | Restarts1].

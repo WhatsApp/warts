@@ -31,7 +31,7 @@
          switch_fail_inference/1,failures/1,
          cover_maps_functions/1,min_max_mixed_types/1,
          not_equal/1,infer_relops/1,binary_unit/1,premature_concretization/1,
-         funs/1]).
+         funs/1,will_succeed/1]).
 
 %% Force id/1 to return 'any'.
 -export([id/1]).
@@ -75,7 +75,8 @@ groups() ->
        infer_relops,
        binary_unit,
        premature_concretization,
-       funs
+       funs,
+       will_succeed
       ]}].
 
 init_per_suite(Config) ->
@@ -1046,7 +1047,15 @@ sto_1(step_4_3) -> {b, [sto_1(case_3_3)]}.
 %% 3, so we must not subtract 2 on the failure path.
 type_subtraction(Config) when is_list(Config) ->
     true = type_subtraction_1(id(<<"A">>)),
+
+    ok = type_subtraction_2(id(true)),
+    <<"aaaa">> = type_subtraction_2(id(false)),
+    {'EXIT', _} = catch type_subtraction_3(id(false)),
+    ok = catch type_subtraction_4(id(ok)),
+    {'EXIT', _} = catch type_subtraction_4(id(false)),
+
     ok.
+
 
 type_subtraction_1(_x@1) ->
     _a@1 = ts_12(_x@1),
@@ -1072,6 +1081,41 @@ ts_23(_x@1) ->
             2
     end.
 
+type_subtraction_2(X) ->
+    case ts_34(X) of
+        Tuple when element(1, Tuple) =:= ok ->
+            ok;
+        Tuple when element(1, Tuple) =:= error ->
+            element(2, Tuple)
+    end.
+
+ts_34(X) ->
+    case X of
+        true -> {ok};
+        false -> {error, <<"aaaa">>}
+    end.
+
+type_subtraction_3(_V0) when is_boolean(_V0), is_binary(_V0), _V0 andalso _V0 ->
+    ok.
+
+type_subtraction_4(_V0) ->
+    try
+        _V0 = ok
+    catch
+        _ ->
+            <<
+                0
+             || _V0 := _ <- ok,
+                (try ok of
+                    _ when _V0, (_V0 andalso _V0) orelse trunc(ok) ->
+                        ok
+                catch
+                    _ ->
+                        ok
+                end)
+            >>
+    end.
+
 %% GH-4774: The validator didn't update container contents on type subtraction.
 container_subtraction(Config) when is_list(Config) ->
     A = id(baz),
@@ -1093,6 +1137,11 @@ cs_2({bar,baz}) ->
 is_list_opt(_Config) ->
     true = is_list_opt_1(id(<<"application/a2l">>)),
     false = is_list_opt_1(id(<<"">>)),
+
+    ok = is_list_opt_3(id([])),
+    true = is_list_opt_3(id([a])),
+    {'EXIT',{badarg,_}} = catch is_list_opt_3(id(no_list)),
+
     ok.
 
 is_list_opt_1(Type) ->
@@ -1103,6 +1152,16 @@ is_list_opt_1(Type) ->
 
 is_list_opt_2(<<"application/a2l">>) -> [<<"a2l">>];
 is_list_opt_2(_Type) -> nil.
+
+is_list_opt_3([]) ->
+    ok;
+is_list_opt_3(A) ->
+    %% The call to is_list/1 would be optimized to an is_nonempty_list
+    %% instruction, which only exists as a guard test that cannot
+    %% produce boolean value.
+    _ = (Bool = is_list(A)) orelse binary_to_integer(<<"">>),
+    Bool.
+
 
 %% We used to determine the type of `get_tuple_element` at the time of
 %% extraction, which is simple but sometimes throws away type information when 
@@ -1433,6 +1492,18 @@ gh_7197() ->
                   ok
           end].
 
+will_succeed(_Config) ->
+    b = will_succeed_1(id(ok), id(#{})),
+    ok.
+
+%% OTP-18576: the beam_call_types:will_succeed/3 check was incorrect for 'bsl',
+%% erroneously stating that it would never fail in some instances.
+will_succeed_1(_V0, _V1)
+  when (1 bsl ((map_size(_V1) bxor 288230376151711743)
+               band 288230376151711743)) =:= _V0 ->
+    a;
+will_succeed_1(_, _) ->
+    b.
 
 %%%
 %%% Common utilities.

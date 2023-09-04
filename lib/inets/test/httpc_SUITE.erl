@@ -68,7 +68,7 @@ all() ->
 
 groups() ->
     [
-     {http, [], real_requests()},
+     {http, [parallel], real_requests()},
      {http_ipv6, [], [request_options]},
      %% process_leak_on_keepalive is depending on stream_fun_server_close
      %% and it shall be the last test case in the suite otherwise cookie
@@ -80,8 +80,8 @@ groups() ->
      {http_unix_socket, [], simulated_unix_socket()},
      {https, [], [def_ssl_opt | real_requests()]},
      {sim_https, [], only_simulated()},
-     {misc, [], misc()},
-     {sim_mixed, [], sim_mixed()}
+     {misc, [parallel], misc()},
+     {sim_mixed, [parallel], sim_mixed()}
     ].
 
 real_requests()->
@@ -98,7 +98,6 @@ real_requests()->
      persistent_connection,
      save_to_file,
      save_to_file_async,
-     headers_as_is,
      page_does_not_exist,
      emulate_lower_versions,
      headers,
@@ -134,6 +133,7 @@ real_requests()->
      stream_through_mfa,
      streaming_error,
      inet_opts,
+     invalid_headers,
      invalid_headers_key,
      invalid_headers_value,
      invalid_body,
@@ -347,13 +347,13 @@ init_per_testcase(pipeline, Config) ->
     httpc:set_options([{pipeline_timeout, 50000},
                        {max_pipeline_length, 3}], pipeline),
 
-    Config;
+    [{profile, pipeline} | Config];
 init_per_testcase(persistent_connection, Config) ->
-    inets:start(httpc, [{profile, persistent}]),
+    inets:start(httpc, [{profile, persistent_connection}]),
     httpc:set_options([{keep_alive_timeout, 50000},
 		       {max_keep_alive_length, 3}], persistent),
 
-    Config;
+    [{profile, persistent_connection} | Config];
 init_per_testcase(Case, Config) when Case == wait_for_whole_response;
                                      Case == remote_socket_close_parallel ->
     ct:timetrap({seconds, 60*3}),
@@ -364,13 +364,16 @@ init_per_testcase(Case, Config) when Case == post;
 				     Case == post_stream ->
     ct:timetrap({seconds, 30}),
     Config;
+init_per_testcase(Case, Config) when Case == timeout_memory_leak ->
+    {ok, _Pid} = inets:start(httpc, [{profile, Case}]),
+    [{profile, Case} | Config];
 init_per_testcase(_Case, Config) ->
     Config.
 
-end_per_testcase(pipeline, _Config) ->
-    inets:stop(httpc, pipeline);
-end_per_testcase(persistent_connection, _Config) ->
-    inets:stop(httpc, persistent);
+end_per_testcase(Case, Config) when Case == timeout_memory_leak;
+                                    Case == pipeline;
+                                    Case == persistent_connection ->
+    inets:stop(httpc, ?config(profile, Config));
 end_per_testcase(Case, Config)
   when Case == server_closing_connection_on_first_response;
        Case == server_closing_connection_on_second_response ->
@@ -562,11 +565,11 @@ pipeline(Config) when is_list(Config) ->
 
 persistent_connection(Config) when is_list(Config) ->
     Request  = {url(group_name(Config), "/dummy.html", Config), []},
-    {ok, _} = httpc:request(get, Request, [?SSL_NO_VERIFY], [], persistent),
+    {ok, _} = httpc:request(get, Request, [?SSL_NO_VERIFY], [], persistent_connection),
 
     %% Make sure pipeline session is registered
     ct:sleep(4000),
-    keep_alive_requests(Request, persistent).
+    keep_alive_requests(Request, persistent_connection).
 
 %%-------------------------------------------------------------------------
 async() ->
@@ -868,18 +871,17 @@ cookie(Config) when is_list(Config) ->
     {ok, {{_,200,_}, [_ | _], [_|_]}}
 	= httpc:request(get, Request0, [?SSL_NO_VERIFY], []),
 
-    %% Populate table to be used by the "dummy" server
-    ets:new(cookie, [named_table, public, set]),
-    ets:insert(cookie, {cookies, true}),
-
     Request1 = {url(group_name(Config), "/", Config), []},
 
-    {ok, {{_,200,_}, [_ | _], [_|_]}}
-	= httpc:request(get, Request1, [?SSL_NO_VERIFY], []),
+    {ok, {{_,200,_}, [_ | _], [_|_]}} = global:trans(
+        {cookies, verify},
+        fun() -> httpc:request(get, Request1, [?SSL_NO_VERIFY], []) end,
+        [node()],
+        100
+    ),
 
    [{session_cookies, [_|_]}] = httpc:which_cookies(httpc:default_profile()),
 
-    ets:delete(cookie),
     ok = httpc:set_options([{cookies, disabled}]).
 
 
@@ -896,16 +898,15 @@ cookie_profile(Config) when is_list(Config) ->
     {ok, {{_,200,_}, [_ | _], [_|_]}}
 	= httpc:request(get, Request0, [?SSL_NO_VERIFY], [], cookie_test),
 
-    %% Populate table to be used by the "dummy" server
-    ets:new(cookie, [named_table, public, set]),
-    ets:insert(cookie, {cookies, true}),
-
     Request1 = {url(group_name(Config), "/", Config), []},
 
-    {ok, {{_,200,_}, [_ | _], [_|_]}}
-	= httpc:request(get, Request1, [?SSL_NO_VERIFY], [], cookie_test),
+    {ok, {{_,200,_}, [_ | _], [_|_]}} = global:trans(
+        {cookies, verify},
+        fun() -> httpc:request(get, Request1, [?SSL_NO_VERIFY], [], cookie_test) end,
+        [node()],
+        100
+    ),
 
-    ets:delete(cookie),
     inets:stop(httpc, cookie_test).
 
 %%-------------------------------------------------------------------------
@@ -944,6 +945,7 @@ headers_as_is(Config) when is_list(Config) ->
 
     {ok, {{_,400,_}, [_|_], [_|_]}} =
 	httpc:request(get, {URL, [{"Te", ""}]}, [?SSL_NO_VERIFY], [{headers_as_is, true}]).
+
 %%-------------------------------------------------------------------------
 
 userinfo(doc) ->
@@ -1281,8 +1283,16 @@ headers_conflict_chunked_with_length(Config) when is_list(Config) ->
     ok.
 
 %%-------------------------------------------------------------------------
+invalid_headers(doc) ->
+    ["Test invalid header format"];
+invalid_headers(Config) when is_list(Config) ->
+    URL = url(group_name(Config), "/dummy.html", Config),
+    {error,{invalid_header,{"headers",
+                            [{"user-agent","httpc"}]}}}	=
+        httpc:request(get, {URL, [{"headers", [{"user-agent", "httpc"}]}]},
+                                  [?SSL_NO_VERIFY], []).
 
-
+%%-------------------------------------------------------------------------
 invalid_headers_key(Config) ->
     Request  = {url(group_name(Config), "/dummy.html", Config),
                 [{cookie, "valid cookie"}]},
@@ -1544,8 +1554,8 @@ inet_opts(Config) when is_list(Config) ->
     httpc:set_options(ConnOptions),
 
     Request  = {url(group_name(Config), "/dummy.html", Config), []},
-    Timeout      = timer:seconds(1),
-    ConnTimeout  = Timeout + timer:seconds(1),
+    Timeout      = timer:seconds(5),
+    ConnTimeout  = Timeout + timer:seconds(5),
     HttpOptions = [{timeout, Timeout}, {connect_timeout, ConnTimeout}, ?SSL_NO_VERIFY],
     Options0     = [{socket_opts, [{tos,    87},
 				   {recbuf, 16#FFFF},
@@ -1585,12 +1595,13 @@ timeout_memory_leak() ->
     [{doc, "Check OTP-8739"}].
 timeout_memory_leak(Config) when is_list(Config) ->
     {_DummyServerPid, Port} = otp_8739_dummy_server(),
-    {ok,Host} = inet:gethostname(),
+    {ok, Host} = inet:gethostname(),
     Request = {?URL_START ++ Host ++ ":" ++ integer_to_list(Port) ++ "/dummy.html", []},
-    case httpc:request(get, Request, [{connect_timeout, 500}, {timeout, 1}], [{sync, true}]) of
+    Profile = ?config(profile, Config),
+    case httpc:request(get, Request, [{connect_timeout, 500}, {timeout, 1}], [{sync, true}], Profile) of
 	{error, timeout} ->
 	    %% And now we check the size of the handler db
-	    Info = httpc:info(),
+	    Info = httpc:info(Profile),
 	    ct:log("Info: ~p", [Info]),
 	    {value, {handlers, Handlers}} =
 		lists:keysearch(handlers, 1, Info),
@@ -2254,7 +2265,6 @@ keep_alive_requests(Request, Profile) ->
     ct:log("Cancel ~p~n", [RequestIdB1]),
     receive_replys([RequestIdB0, RequestIdB2]).
 
-
 receive_replys([]) ->
     ok;
 receive_replys([ID|IDs]) ->
@@ -2265,8 +2275,6 @@ receive_replys([ID|IDs]) ->
 	    ct:pal("~p",[{recived_canceld_id, Other}])
     end.
 
-
-
 inet_version() ->
     inet. %% Just run inet for now
     %% case gen_tcp:listen(0,[inet6]) of
@@ -2276,119 +2284,6 @@ inet_version() ->
     %% 	_ ->
     %% 	    inet
     %%end.
-
-dummy_server(Inet) ->
-    dummy_server(self(), ip_comm, Inet, []).
-
-dummy_server(SocketType, Inet, Extra) ->
-    dummy_server(self(), SocketType, Inet, Extra).
-
-dummy_server(Caller, SocketType, Inet, Extra) ->
-    Args = [Caller, SocketType, Inet, Extra],
-    Pid = spawn(httpc_SUITE, dummy_server_init, Args),
-    receive
-	{port, Port} ->
-	    {Pid, Port}
-    end.
-
-dummy_server_init(Caller, ip_comm, Inet, _) ->
-    BaseOpts = [binary, {packet, 0}, {reuseaddr,true}, {keepalive, true}, {active, false}], 
-    {ok, ListenSocket} = gen_tcp:listen(0, [Inet | BaseOpts]),
-    {ok, Port} = inet:port(ListenSocket),
-    Caller ! {port, Port},
-    dummy_ipcomm_server_loop({httpd_request, parse, [[{max_uri,    ?HTTP_MAX_URI_SIZE},
-						      {max_header, ?HTTP_MAX_HEADER_SIZE},
-						      {max_version,?HTTP_MAX_VERSION_STRING}, 
-						      {max_method, ?HTTP_MAX_METHOD_STRING},
-						      {max_content_length, ?HTTP_MAX_CONTENT_LENGTH},
-						      {customize, httpd_custom}
-						     ]]},
-    [], ListenSocket);
-
-dummy_server_init(Caller, ssl, Inet, SSLOptions) ->
-    BaseOpts = [binary, {reuseaddr,true}, {active, false} |
-	        SSLOptions], 
-    dummy_ssl_server_init(Caller, BaseOpts, Inet).
-
-dummy_ssl_server_init(Caller, BaseOpts, Inet) ->
-    {ok, ListenSocket} = ssl:listen(0, [Inet | BaseOpts]),
-    {ok, {_, Port}} = ssl:sockname(ListenSocket),
-    Caller ! {port, Port},
-    dummy_ssl_server_loop({httpd_request, parse, [[{max_uri,    ?HTTP_MAX_URI_SIZE},
-						   {max_method, ?HTTP_MAX_METHOD_STRING},
-						   {max_version,?HTTP_MAX_VERSION_STRING}, 
-						   {max_method, ?HTTP_MAX_METHOD_STRING},
-						   {max_content_length, ?HTTP_MAX_CONTENT_LENGTH},
-						   {customize, httpd_custom}
-						  ]]},
-			  [], ListenSocket).
-
-dummy_ipcomm_server_loop(MFA, Handlers, ListenSocket) ->
-    receive
-	stop ->
-	    lists:foreach(fun(Handler) -> Handler ! stop end, Handlers);
-	{stop, From} ->
-	    Stopper = fun(Handler) -> Handler ! stop end, 
-	    lists:foreach(Stopper, Handlers),
-	    From ! {stopped, self()}
-    after 0 ->
-	    {ok, Socket} = gen_tcp:accept(ListenSocket),
-	    HandlerPid  = dummy_request_handler(MFA, Socket),
-	    gen_tcp:controlling_process(Socket, HandlerPid),
-	    HandlerPid ! ipcomm_controller,
-	    dummy_ipcomm_server_loop(MFA, [HandlerPid | Handlers],
-				     ListenSocket)
-    end.
-
-dummy_ssl_server_loop(MFA, Handlers, ListenSocket) ->
-    receive
-	stop ->
-	    lists:foreach(fun(Handler) -> Handler ! stop end, Handlers);
-	{stop, From} ->
-	    Stopper = fun(Handler) -> Handler ! stop end, 
-	    lists:foreach(Stopper, Handlers),
-	    From ! {stopped, self()}
-    after 0 ->
-	    {ok, Tsocket} = ssl:transport_accept(ListenSocket),
-	    {ok, Ssocket} = ssl:handshake(Tsocket, infinity),
-	    HandlerPid  = dummy_request_handler(MFA, Ssocket),
-	    ssl:controlling_process(Ssocket, HandlerPid),
-	    HandlerPid ! ssl_controller,
-	    dummy_ssl_server_loop(MFA, [HandlerPid | Handlers],
-				  ListenSocket)
-    end.
-
-dummy_request_handler(MFA, Socket) ->
-    spawn(httpc_SUITE, dummy_request_handler_init, [MFA, Socket]).
-
-dummy_request_handler_init(MFA, Socket) ->
-    SockType = 
-	receive 
-	    ipcomm_controller ->
-		inet:setopts(Socket, [{active, true}]),
-		ip_comm;
-	    ssl_controller ->
-		ssl:setopts(Socket, [{active, true}]),
-		ssl
-	end,
-    dummy_request_handler_loop(MFA, SockType, Socket).
-    
-dummy_request_handler_loop({Module, Function, Args}, SockType, Socket) ->
-    receive 
-	{Proto, _, Data} when (Proto =:= tcp) orelse (Proto =:= ssl) ->
-	    case handle_request(Module, Function, [Data | Args], Socket) of
-		stop when Proto =:= tcp ->
-		    gen_tcp:close(Socket);
-		stop when Proto =:= ssl ->
-		    ssl:close(Socket);
-		NewMFA ->
-		    dummy_request_handler_loop(NewMFA, SockType, Socket)
-	    end;
-	stop when SockType =:= ip_comm ->
-	    gen_tcp:close(Socket);
-	stop when SockType =:= ssl ->
-	    ssl:close(Socket)
-    end.
 
 handle_request(Module, Function, Args, Socket) ->
     case Module:Function(Args) of
@@ -2441,11 +2336,12 @@ handle_http_msg({Method, RelUri, _, {_, Headers}, Body}, Socket, _) ->
 		end
 	end,
    
-    case (catch ets:lookup(cookie, cookies)) of 
-	[{cookies, true}]->
-	    check_cookie(Headers);
-	_ ->
-	    ok
+    case global:trans({cookies, verify}, fun() -> unset end, [node()], 0) of
+        aborted->
+            % somebody has the lock and wants us to check
+            check_cookie(Headers);
+        unset ->
+            ok
     end,
 
    {ok, {_, Port}} = sockname(Socket),
@@ -2473,31 +2369,6 @@ handle_http_msg({Method, RelUri, _, {_, Headers}, Body}, Socket, _) ->
 	    end
     end,
     NextRequest.
-
-dummy_ssl_server_hang(Caller, Inet, SslOpt) ->
-    Pid = spawn(httpc_SUITE, dummy_ssl_server_hang_init, [Caller, Inet, SslOpt]),
-    receive
-	{port, Port} ->
-	    {Pid, Port}
-    end.
-
-dummy_ssl_server_hang_init(Caller, Inet, SslOpt) ->
-    {ok, ListenSocket} =
-	ssl:listen(0, [binary, Inet, {packet, 0},
-			       {reuseaddr,true},
-			       {active, false}] ++ SslOpt),
-    {ok, {_,Port}} = ssl:sockname(ListenSocket),
-    Caller ! {port, Port},
-    {ok, AcceptSocket} = ssl:transport_accept(ListenSocket),
-    dummy_ssl_server_hang_loop(AcceptSocket).
-
-dummy_ssl_server_hang_loop(_) ->
-    %% Do not do ssl:handshake as we
-    %% want to time out the underlying gen_tcp:connect
-    receive
-	stop ->
-	    ok
-    end.
 
 ensure_host_header_with_port([]) ->
     false;

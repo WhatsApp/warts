@@ -2320,9 +2320,15 @@ void BeamModuleAssembler::emit_i_bs_create_bin(const ArgLabel &Fail,
                 estimated_num_bits += seg_size;
             }
         } else if (seg.unit > 0) {
-            auto max = std::min(std::get<1>(getClampedRange(seg.size)),
-                                Sint((ERL_ONHEAP_BIN_LIMIT + 1) * 8));
-            estimated_num_bits += max * seg.unit;
+            if ((seg.unit % 8) == 0) {
+                auto max = std::min(std::get<1>(getClampedRange(seg.size)),
+                                    Sint((ERL_ONHEAP_BIN_LIMIT + 1) * 8));
+                estimated_num_bits += max * seg.unit;
+            } else {
+                /* May create a non-binary bitstring in some cases, suppress
+                 * creation of heap binary. */
+                estimated_num_bits += (ERL_ONHEAP_BIN_LIMIT + 1) * 8;
+            }
         } else {
             switch (seg.type) {
             case am_utf8:
@@ -3700,7 +3706,7 @@ static std::vector<BsmSegment> opt_bsm_segments(
             }
             break;
         case BsmSegment::action::GET_BINARY:
-            heap_need += heap_bin_size((seg.size + 7) / 8);
+            heap_need += erts_extracted_binary_size(seg.size);
             break;
         case BsmSegment::action::GET_TAIL:
             heap_need += EXTRACT_SUB_BIN_HEAP_NEED;

@@ -20,8 +20,15 @@
 -module(group).
 
 %% A group leader process for user io.
+%% This process receives input data from user_drv in this format
+%%   {Drv,{data,unicode:charlist()}}
+%% It then keeps that data as unicode in its state and converts it
+%% to latin1/unicode on a per request basis. If any data is left after
+%% a request, that data is again kept as unicode.
 
 -export([start/2, start/3, whereis_shell/0, server/4]).
+
+-export([server_loop/3]).
 
 start(Drv, Shell) ->
     start(Drv, Shell, []).
@@ -40,7 +47,6 @@ server(Ancestors, Drv, Shell, Options) ->
     put(line_buffer, proplists:get_value(line_buffer, Options, group_history:load())),
     put(read_mode, list),
     put(user_drv, Drv),
-    put(unicode_state, true),
     ExpandFun = normalize_expand_fun(Options, fun edlin_expand:expand/2),
     put(expand_fun, ExpandFun),
     put(echo, proplists:get_value(echo, Options, true)),
@@ -108,26 +114,29 @@ start_shell1(Fun) ->
 	    exit(Error)				% let the group process crash
     end.
 
+-spec server_loop(UserDrv :: pid(), Shell:: pid(),
+                  Buffer :: unicode:chardata()) ->
+          no_return().
 server_loop(Drv, Shell, Buf0) ->
     receive
         {io_request,From,ReplyAs,Req} when is_pid(From) ->
             %% This io_request may cause a transition to a couple of
             %% selective receive loops elsewhere in this module.
             Buf = io_request(Req, From, ReplyAs, Drv, Shell, Buf0),
-            server_loop(Drv, Shell, Buf);
+            ?MODULE:server_loop(Drv, Shell, Buf);
         {reply,{From,ReplyAs},Reply} ->
             io_reply(From, ReplyAs, Reply),
-	    server_loop(Drv, Shell, Buf0);
+	    ?MODULE:server_loop(Drv, Shell, Buf0);
 	{driver_id,ReplyTo} ->
 	    ReplyTo ! {self(),driver_id,Drv},
-	    server_loop(Drv, Shell, Buf0);
+	    ?MODULE:server_loop(Drv, Shell, Buf0);
 	{Drv, echo, Bool} ->
 	    put(echo, Bool),
-	    server_loop(Drv, Shell, Buf0);
+	    ?MODULE:server_loop(Drv, Shell, Buf0);
 	{'EXIT',Drv,interrupt} ->
 	    %% Send interrupt to the shell.
 	    exit_shell(interrupt),
-	    server_loop(Drv, Shell, Buf0);
+	    ?MODULE:server_loop(Drv, Shell, Buf0);
 	{'EXIT',Drv,R} ->
 	    exit(R);
 	{'EXIT',Shell,R} ->
@@ -139,7 +148,7 @@ server_loop(Drv, Shell, Buf0) ->
 			 (tuple_size(NotDrvTuple) =/= 2) orelse
 			 (element(1, NotDrvTuple) =/= Drv) ->
 	    %% Ignore this unknown message.
-	    server_loop(Drv, Shell, Buf0)
+	    ?MODULE:server_loop(Drv, Shell, Buf0)
     end.
 
 exit_shell(Reason) ->
@@ -207,8 +216,7 @@ io_request(Req, From, ReplyAs, Drv, Shell, Buf0) ->
 
 
 %% Put_chars, unicode is the normal message, characters are always in
-%%standard unicode
-%% format.
+%% standard unicode format.
 %% You might be tempted to send binaries unchecked, but the driver
 %% expects unicode, so that is what we should send...
 %% io_request({put_chars,unicode,Binary}, Drv, Buf) when is_binary(Binary) ->
@@ -240,27 +248,17 @@ io_request({put_chars,unicode,M,F,As}, Drv, _Shell, From, Buf) ->
 	    end
     end;
 io_request({put_chars,latin1,Binary}, Drv, _Shell, From, Buf) when is_binary(Binary) ->
-    IsUnicode = get(unicode_state),
-    if IsUnicode ->
-            send_drv(Drv,
-                     {put_chars_sync, unicode,
-                      unicode:characters_to_binary(Binary,latin1),
-                      From});
-        true ->
-            send_drv(Drv, {put_chars_sync, latin1, Binary, From})
-    end,
+    send_drv(Drv, {put_chars_sync, unicode,
+                   unicode:characters_to_binary(Binary,latin1),
+                   From}),
     {noreply,Buf};
 io_request({put_chars,latin1,Chars}, Drv, _Shell, From, Buf) ->
-    IsUnicode = get(unicode_state),
-    if IsUnicode ->
-            case catch unicode:characters_to_binary(Chars,latin1) of
-                Binary when is_binary(Binary) ->
-                    send_drv(Drv, {put_chars_sync, unicode, Binary, From}),
-                    {noreply,Buf};
-                _ ->
-                    {error,{error,{put_chars,latin1,Chars}},Buf}
-            end;
-        true -> send_drv(Drv, {put_chars_sync, latin1, Chars, From})
+    case catch unicode:characters_to_binary(Chars,latin1) of
+        Binary when is_binary(Binary) ->
+            send_drv(Drv, {put_chars_sync, unicode, Binary, From}),
+            {noreply,Buf};
+        _ ->
+            {error,{error,{put_chars,latin1,Chars}},Buf}
     end;
 io_request({put_chars,latin1,M,F,As}, Drv, _Shell, From, Buf) ->
     case catch apply(M, F, As) of
@@ -391,13 +389,16 @@ setopts(Opts0,Drv,Buf) ->
     end.
 check_valid_opts([]) ->
     true;
-check_valid_opts([{binary,_}|T]) ->
+check_valid_opts([{binary,Flag}|T]) when is_boolean(Flag) ->
     check_valid_opts(T);
-check_valid_opts([{encoding,Valid}|T]) when Valid =:= unicode; Valid =:= utf8; Valid =:= latin1 ->
+check_valid_opts([{encoding,Valid}|T]) when Valid =:= unicode;
+                                            Valid =:= utf8;
+                                            Valid =:= latin1 ->
     check_valid_opts(T);
-check_valid_opts([{echo,_}|T]) ->
+check_valid_opts([{echo,Flag}|T]) when is_boolean(Flag) ->
     check_valid_opts(T);
-check_valid_opts([{expand_fun,_}|T]) ->
+check_valid_opts([{expand_fun,Fun}|T]) when is_function(Fun, 1);
+                                            is_function(Fun, 2) ->
     check_valid_opts(T);
 check_valid_opts(_) ->
     false.
@@ -405,14 +406,12 @@ check_valid_opts(_) ->
 do_setopts(Opts, Drv, Buf) ->
     put(expand_fun, normalize_expand_fun(Opts, get(expand_fun))),
     put(echo, proplists:get_value(echo, Opts, get(echo))),
-    case proplists:get_value(encoding,Opts) of
+    case proplists:get_value(encoding, Opts) of
 	Valid when Valid =:= unicode; Valid =:= utf8 ->
-           set_unicode_state(Drv,true),
-           put(unicode_state, true);
+           set_unicode_state(Drv,true);
 	latin1 ->
-           set_unicode_state(Drv,false),
-           put(unicode_state, false);
-	_ ->
+           set_unicode_state(Drv,false);
+	undefined ->
 	    ok
     end,
     case proplists:get_value(binary, Opts, case get(read_mode) of
@@ -424,8 +423,6 @@ do_setopts(Opts, Drv, Buf) ->
 	    {ok,ok,Buf};
 	false ->
 	    put(read_mode, list),
-	    {ok,ok,Buf};
-	_ ->
 	    {ok,ok,Buf}
     end.
 
@@ -497,13 +494,14 @@ get_chars_loop(Pbs, M, F, Xa, Drv, Shell, Buf0, State, LineCont0, Encoding) ->
                  true ->
                      get_line(Buf0, Pbs, LineCont0, Drv, Shell, Encoding);
                  false ->
-                     %% get_line_echo_off only deals with lists
-                     %% and does not need encoding...
-                     get_line_echo_off(Buf0, Pbs, Drv, Shell)
+                     %% get_line_echo_off only deals with lists,
+                     %% so convert to list before calling it.
+                     get_line_echo_off(cast(Buf0, list, Encoding), Pbs, Drv, Shell)
              end,
     case Result of
         {done,LineCont1,Buf} ->
-            get_chars_apply(Pbs, M, F, Xa, Drv, Shell, Buf, State, LineCont1, Encoding);
+            get_chars_apply(Pbs, M, F, Xa, Drv, Shell, append(Buf, [], Encoding),
+                            State, LineCont1, Encoding);
 
         interrupted ->
             {error,{error,interrupted},[]};
@@ -522,6 +520,8 @@ get_chars_apply(Pbs, M, F, Xa, Drv, Shell, Buf, State0, LineCont, Encoding) ->
         {stop,Result,eof} ->
             {ok,Result,eof};
         {stop,Result,Rest} ->
+            %% Prompt was valid expression, clear the prompt in user_drv
+            send_drv_reqs(Drv, [new_prompt]),
             _ = case {M,F} of
                     {io_lib, get_until} ->
                         save_line_buffer(string:trim(Line, both)++"\n", get_lines(new_stack(get(line_buffer))));
@@ -537,10 +537,8 @@ get_chars_apply(Pbs, M, F, Xa, Drv, Shell, Buf, State0, LineCont, Encoding) ->
 
 get_chars_n_loop(Pbs, M, F, Xa, Drv, Shell, Buf0, State, Encoding) ->
     try M:F(State, cast(Buf0, get(read_mode), Encoding), Encoding, Xa) of
-        {stop,Result,eof} ->
-            {ok,Result,eof};
         {stop,Result,Rest} ->
-            {ok,Result,append(Rest, [], Encoding)};
+            {ok, Result, append(Rest,[],Encoding)};
         State1 ->
             case get_chars_echo_off(Pbs, Drv, Shell) of
                 interrupted ->
@@ -604,13 +602,12 @@ get_line1({undefined,{_A,Mode,Char},Cs,Cont,Rs}, Drv, Shell, Ls0, Encoding)
             send_drv_reqs(Drv, edlin:erase_line()),
             {more_chars,Ncont,Nrs} = edlin:start(edlin:prompt(Cont)),
             send_drv_reqs(Drv, Nrs),
-            get_line1(edlin:edit_line1(string:to_graphemes(lists:sublist(Lcs,
-                                                                         1,
-                                                                         length(Lcs)-1)),
-                                       Ncont),
-                      Drv,
-                      Shell,
-                      Ls, Encoding)
+            get_line1(
+              edlin:edit_line1(
+                string:to_graphemes(
+                  lists:sublist(Lcs, 1, length(Lcs)-1)),
+                Ncont),
+              Drv, Shell, Ls, Encoding)
     end;
 get_line1({undefined,{_A,Mode,Char},Cs,Cont,Rs}, Drv, Shell, Ls0, Encoding)
   when Mode =:= none, Char =:= $\^N;
@@ -696,12 +693,12 @@ get_line1({Expand, Before, Cs0, Cont,Rs}, Drv, Shell, Ls0, Encoding)
                                      _ ->
                                          %% If there are more results than fit on
                                          %% screen we expand above
-                                         send_drv_reqs(Drv, [{put_chars_keep_state, unicode, NlMatchStr},redraw_prompt]),
+                                         send_drv_reqs(Drv, [{put_chars, unicode, NlMatchStr}]),
                                          [$\e, $l | Cs1]
                                  end
                          end;
                      false ->
-                         send_drv(Drv, {put_chars_keep_state, unicode, NlMatchStr}),
+                         send_drv(Drv, {put_chars, unicode, NlMatchStr}),
                          [$\e, $l | Cs1]
                  end
          end,
@@ -772,7 +769,7 @@ get_line1({What,{line,Prompt,{_,{RevCmd0,_},_},search},_Rs},
                              send_drv(Drv, beep),
                              put(search_result, []),
                              send_drv(Drv, delete_line),
-                             send_drv(Drv, {put_chars, unicode, unicode:characters_to_binary(Prompt++Cmd)}),
+                             send_drv(Drv, {insert_chars, unicode, unicode:characters_to_binary(Prompt++Cmd)}),
                              {Ls2, {[],{RevCmd, []},[]}};
                          {Line, Ls2} -> % found. Complete the output edlin couldn't have done.
                              Lines = string:split(string:to_graphemes(Line), "\n", all),
@@ -784,7 +781,7 @@ get_line1({What,{line,Prompt,{_,{RevCmd0,_},_},search},_Rs},
                                       end,
                              put(search_result, Lines),
                              send_drv(Drv, delete_line),
-                             send_drv(Drv, {put_chars, unicode, unicode:characters_to_binary(Prompt++Cmd)}),
+                             send_drv(Drv, {insert_chars, unicode, unicode:characters_to_binary(Prompt++Cmd)}),
                              send_drv(Drv, {put_expand_no_trim, unicode, unicode:characters_to_binary(Output)}),
                              {Ls2, {[],{RevCmd, []},[]}}
                      end,
@@ -800,7 +797,8 @@ more_data(What, Cont0, Drv, Shell, Ls, Encoding) ->
             send_drv_reqs(Drv, edlin:redraw_line(Cont0)),
             more_data(What, Cont0, Drv, Shell, Ls, Encoding);
         {Drv,{data,Cs}} ->
-            get_line1(edlin:edit_line(Cs, Cont0), Drv, Shell, Ls, Encoding);
+            get_line1(edlin:edit_line(cast(Cs, list), Cont0),
+                      Drv, Shell, Ls, Encoding);
         {Drv,eof} ->
             get_line1(edlin:edit_line(eof, Cont0), Drv, Shell, Ls, Encoding);
         {io_request,From,ReplyAs,Req} when is_pid(From) ->
@@ -831,7 +829,7 @@ get_line_echo_off(Chars, Pbs, Drv, Shell) ->
 get_line_echo_off1({Chars,[]}, Drv, Shell) ->
     receive
 	{Drv,{data,Cs}} ->
-	    get_line_echo_off1(edit_line(Cs, Chars), Drv, Shell);
+	    get_line_echo_off1(edit_line(cast(Cs, list), Chars), Drv, Shell);
 	{Drv,eof} ->
 	    get_line_echo_off1(edit_line(eof, Chars), Drv, Shell);
 	{io_request,From,ReplyAs,Req} when is_pid(From) ->
@@ -854,13 +852,13 @@ get_line_echo_off1({Chars,Rest}, _Drv, _Shell) ->
     {done,lists:reverse(Chars),case Rest of done -> []; _ -> Rest end}.
 
 get_chars_echo_off(Pbs, Drv, Shell) ->
-    send_drv_reqs(Drv, [{put_chars, unicode,Pbs}]),
+    send_drv_reqs(Drv, [{insert_chars, unicode,Pbs}]),
     get_chars_echo_off1(Drv, Shell).
 
 get_chars_echo_off1(Drv, Shell) ->
     receive
         {Drv, {data, Cs}} ->
-            Cs;
+            cast(Cs, list);
         {Drv, eof} ->
             eof;
         {io_request,From,ReplyAs,Req} when is_pid(From) ->
@@ -1008,7 +1006,7 @@ get_password_line(Chars, Drv, Shell) ->
 get_password1({Chars,[]}, Drv, Shell) ->
     receive
 	{Drv,{data,Cs}} ->
-	    get_password1(edit_password(Cs,Chars),Drv,Shell);
+	    get_password1(edit_password(Cs,cast(Chars,list)),Drv,Shell);
 	{io_request,From,ReplyAs,Req} when is_pid(From) ->
 	    io_request(Req, From, ReplyAs, Drv, Shell, []), %WRONG!!!
 	    %% I guess the reason the above line is wrong is that Buf is
@@ -1027,7 +1025,7 @@ get_password1({Chars,[]}, Drv, Shell) ->
 	    exit(R)
     end;
 get_password1({Chars,Rest},Drv,_Shell) ->
-    send_drv_reqs(Drv,[{put_chars, unicode, "\n"}]),
+    send_drv_reqs(Drv,[{insert_chars, unicode, "\n"}]),
     {done,lists:reverse(Chars),case Rest of done -> []; _ -> Rest end}.
 
 edit_password([],Chars) ->
@@ -1048,20 +1046,18 @@ edit_password([Char|Cs],Chars) ->
 prompt_bytes(Prompt, Encoding) ->
     lists:flatten(io_lib:format_prompt(Prompt, Encoding)).
 
-cast(L, binary,latin1) when is_list(L) ->
-    list_to_binary(L);
-cast(L, list, latin1) when is_list(L) ->
-    binary_to_list(list_to_binary(L)); %% Exception if not bytes
-cast(L, binary,unicode) when is_list(L) ->
-    unicode:characters_to_binary(L,utf8);
-cast(Other, _, _) ->
-    Other.
+cast(Buf, Type) ->
+    cast(Buf, Type, utf8).
+cast(eof, _, _) ->
+    eof;
+cast(L, binary, ToEnc) ->
+    unicode:characters_to_binary(L, utf8, ToEnc);
+cast(L, list, _ToEnc) ->
+    unicode:characters_to_list(L, utf8).
 
-append(B, L, latin1) when is_binary(B) ->
-    binary_to_list(B)++L;
-append(B, L, unicode) when is_binary(B) ->
-    unicode:characters_to_list(B,utf8)++L;
-append(L1, L2, _) when is_list(L1) ->
-    L1++L2;
-append(_Eof, L, _) ->
-    L.
+append(eof, [], _) ->
+    eof;
+append(eof, L, _) ->
+    L;
+append(B, L, FromEnc) ->
+    unicode:characters_to_list(B, FromEnc) ++ L.

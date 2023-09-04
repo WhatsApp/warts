@@ -173,7 +173,7 @@ erts_bld_bin_list(Uint **hpp, Uint *szp, ErlOffHeap* oh, Eterm tail)
     union erl_off_heap_ptr u;
     Eterm res = tail;
     Eterm tuple;
-    struct erts_tmp_aligned_offheap tmp;
+    union erts_tmp_aligned_offheap tmp;
 
     for (u.hdr = oh->first; u.hdr; u.hdr = u.hdr->next) {
         erts_align_offheap(&u, &tmp);
@@ -3360,6 +3360,11 @@ BIF_RETTYPE system_info_1(BIF_ALIST_1)
 #endif
     } else if (ERTS_IS_ATOM_STR("system_logger", BIF_ARG_1)) {
         BIF_RET(erts_get_system_logger());
+    } else if (ERTS_IS_ATOM_STR("max_integer", BIF_ARG_1)) {
+        Eterm *hp = HAlloc(BIF_P, BIG_ARITY_MAX+1);
+        hp[0] = make_pos_bignum_header(BIG_ARITY_MAX);
+        sys_memset(hp + 1, 0xff, BIG_ARITY_MAX*sizeof(Eterm));
+        BIF_RET(make_big(hp));
     }
 
     BIF_ERROR(BIF_P, BADARG);
@@ -3674,7 +3679,7 @@ fun_info_2(BIF_ALIST_2)
         hp = HAlloc(p, 3);
         break;
     case am_pid:
-        val = is_local_fun(funp) ? funp->creator : am_undefined;
+        val = is_local_fun(funp) ? erts_init_process_id : am_undefined;
         hp = HAlloc(p, 3);
         break;
     case am_module:
@@ -3702,7 +3707,7 @@ fun_info_2(BIF_ALIST_2)
         break;
     case am_env:
         {
-            Uint num_free = funp->num_free;
+            Uint num_free = fun_num_free(funp);
             int i;
 
             hp = HAlloc(p, 3 + 2 * num_free);
@@ -3724,7 +3729,7 @@ fun_info_2(BIF_ALIST_2)
         hp = HAlloc(p, 3);
         break;
     case am_arity:
-        val = make_small(funp->arity);
+        val = make_small(fun_arity(funp));
         hp = HAlloc(p, 3);
         break;
     case am_name:
@@ -3763,7 +3768,7 @@ fun_info_mfa_1(BIF_ALIST_1)
                 BIF_RET(TUPLE3(hp,
                                funp->entry.fun->module,
                                NIL,
-                               make_small(funp->arity)));
+                               make_small(fun_arity(funp))));
             }
         } else {
             ASSERT(is_external_fun(funp) && funp->next == NULL);
@@ -3773,7 +3778,7 @@ fun_info_mfa_1(BIF_ALIST_1)
         BIF_RET(TUPLE3(hp,
                        mfa->module,
                        mfa->function,
-                       make_small(funp->arity)));
+                       make_small(fun_arity(funp))));
     }
 
     BIF_ERROR(p, BADARG);
@@ -4527,7 +4532,7 @@ BIF_RETTYPE erts_debug_get_internal_state_1(BIF_ALIST_1)
 		BIF_RET(erts_debug_reader_groups_map(BIF_P, (int) groups));
 	    }
 	    else if (ERTS_IS_ATOM_STR("internal_hash", tp[1])) {
-		Uint hash = (Uint) make_internal_hash(tp[2], 0);
+		Uint hash = (Uint) erts_internal_hash(tp[2]);
 		Uint hsz = 0;
 		Eterm* hp;
 		erts_bld_uint(NULL, &hsz, hash);
@@ -5346,16 +5351,19 @@ erts_get_ethread_info(Process *c_p)
 
 static BIF_RETTYPE
 gather_histograms_helper(Process * c_p, Eterm arg_tuple,
-                         int gather(Process *, int, int, int, UWord, Eterm))
+                         int gather(Process *, int, int, int, UWord, int, Eterm))
 {
     SWord hist_start, hist_width, aux_work_tid;
     int msg_count, alloc_num;
     Eterm *args;
+    int flags;
 
-    /* This is an internal BIF, so the error checking is mostly left to erlang
-     * code. */
+    /* This is an internal BIF so the error checking is mostly left to erlang
+     * code, we'll just make sure we won't crash the emulator outright. */
+    if (!is_tuple_arity(arg_tuple, 6)) {
+        BIF_ERROR(c_p, BADARG);
+    }
 
-    ASSERT(is_tuple_arity(arg_tuple, 5));
     args = tuple_val(arg_tuple);
 
     for (alloc_num = ERTS_ALC_A_MIN; alloc_num <= ERTS_ALC_A_MAX; alloc_num++) {
@@ -5371,12 +5379,14 @@ gather_histograms_helper(Process * c_p, Eterm arg_tuple,
     aux_work_tid = signed_val(args[2]);
     hist_width = signed_val(args[3]);
     hist_start = signed_val(args[4]);
+    flags = signed_val(args[5]);
 
     if (aux_work_tid < 0 || erts_no_aux_work_threads <= aux_work_tid) {
         BIF_ERROR(c_p, BADARG);
     }
 
-    msg_count = gather(c_p, alloc_num, aux_work_tid, hist_width, hist_start, args[5]);
+    msg_count = gather(c_p, alloc_num, aux_work_tid, hist_width, hist_start,
+                       flags, args[6]);
 
     BIF_RET(make_small(msg_count));
 }

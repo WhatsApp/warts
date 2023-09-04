@@ -734,8 +734,8 @@ do {						\
 
 typedef struct ErtsPStack_ {
     byte* pstart;
-    int offs;   /* "stack pointer" as byte offset from pstart */
-    int size;   /* allocated size in bytes */
+    SWord offs;   /* "stack pointer" as byte offset from pstart */
+    SWord size;   /* allocated size in bytes */
     ErtsAlcType_t alloc_type;
 }ErtsPStack;
 
@@ -746,7 +746,7 @@ void erl_grow_pstack(ErtsPStack* s, void* default_pstack, unsigned need_bytes);
 #define PSTACK_DECLARE(s, DEF_PSTACK_SIZE) \
 PSTACK_TYPE PSTK_DEF_STACK(s)[DEF_PSTACK_SIZE];                            \
 ErtsPStack s = { (byte*)PSTK_DEF_STACK(s), /* pstart */                    \
-                 -(int)sizeof(PSTACK_TYPE), /* offs */                     \
+                 -(SWord)sizeof(PSTACK_TYPE), /* offs */                   \
                  DEF_PSTACK_SIZE*sizeof(PSTACK_TYPE), /* size */           \
                  ERTS_ALC_T_ESTACK   /* alloc_type */                      \
 }
@@ -1598,6 +1598,7 @@ Eterm erts_unary_minus(Process* p, Eterm arg1);
 Eterm erts_mixed_plus(Process* p, Eterm arg1, Eterm arg2);
 Eterm erts_mixed_minus(Process* p, Eterm arg1, Eterm arg2);
 Eterm erts_mixed_times(Process* p, Eterm arg1, Eterm arg2);
+Eterm erts_mul_add(Process* p, Eterm arg1, Eterm arg2, Eterm arg3, Eterm* pp);
 Eterm erts_mixed_div(Process* p, Eterm arg1, Eterm arg2);
 
 int erts_int_div_rem(Process* p, Eterm arg1, Eterm arg2, Eterm *q, Eterm *r);

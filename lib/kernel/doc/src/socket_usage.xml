@@ -310,6 +310,13 @@
 	<cell>type = dgram</cell>
       </row>
       <row>
+	<cell>bsp_state</cell>
+	<cell>map()</cell>
+	<cell>no</cell>
+	<cell>yes</cell>
+	<cell>Windows only</cell>
+      </row>
+      <row>
 	<cell>debug</cell>
 	<cell>integer()</cell>
 	<cell>yes</cell>
@@ -331,6 +338,13 @@
 	<cell>none</cell>
       </row>
       <row>
+	<cell>exclusiveaddruse</cell>
+	<cell>boolean()</cell>
+	<cell>yes</cell>
+	<cell>yes</cell>
+	<cell>Windows only</cell>
+      </row>
+      <row>
 	<cell>keepalive</cell>
 	<cell>boolean()</cell>
 	<cell>yes</cell>
@@ -343,6 +357,20 @@
 	<cell>yes</cell>
 	<cell>yes</cell>
 	<cell>none</cell>
+      </row>
+      <row>
+	<cell>maxdg</cell>
+	<cell>integer()</cell>
+	<cell>no</cell>
+	<cell>yes</cell>
+	<cell>Windows only</cell>
+      </row>
+      <row>
+	<cell>max_msg_size</cell>
+	<cell>integer()</cell>
+	<cell>no</cell>
+	<cell>yes</cell>
+	<cell>Windows only</cell>
       </row>
       <row>
 	<cell>oobinline</cell>
@@ -895,6 +923,35 @@
 	<cell>none</cell>
       </row>
       <row>
+	<cell>cork</cell>
+	<cell>boolean()</cell>
+	<cell>yes</cell>
+	<cell>yes</cell>
+	<cell>'nopush' one some platforms (FreeBSD)</cell>
+      </row>
+      <row>
+	<cell>keepcnt</cell>
+	<cell>integer()</cell>
+	<cell>yes</cell>
+	<cell>yes</cell>
+	<cell>On Windows (at least),
+	it is illegal to set to a value greater than 255.</cell>
+      </row>
+      <row>
+	<cell>keepidle</cell>
+	<cell>integer()</cell>
+	<cell>yes</cell>
+	<cell>yes</cell>
+	<cell>none</cell>
+      </row>
+      <row>
+	<cell>keepintvl</cell>
+	<cell>integer()</cell>
+	<cell>yes</cell>
+	<cell>yes</cell>
+	<cell>none</cell>
+      </row>
+      <row>
 	<cell>maxseg</cell>
 	<cell>integer()</cell>
 	<cell>yes</cell>
@@ -907,6 +964,17 @@
 	<cell>yes</cell>
 	<cell>yes</cell>
 	<cell>none</cell>
+      </row>
+      <row>
+	<cell>nopush</cell>
+	<cell>boolean()</cell>
+	<cell>yes</cell>
+	<cell>yes</cell>
+	<cell>
+	  'cork' on some platforms (Linux).
+	  On Darwin this has a different meaning than
+	  on, for instance, FreeBSD.
+	</cell>
       </row>
       <tcaption>tcp options</tcaption>
     </table>

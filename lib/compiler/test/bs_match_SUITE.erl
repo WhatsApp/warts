@@ -19,7 +19,10 @@
 %%
 
 -module(bs_match_SUITE).
--compile(nowarn_shadow_vars).
+
+%% Limiting error locations to lines makes it more likely that unsafe
+%% reordering of clauses will be noticed.
+-compile([nowarn_shadow_vars, {error_location,line}]).
 
 -export([all/0, suite/0,groups/0,init_per_suite/1, end_per_suite/1, 
 	 init_per_group/2,end_per_group/2,
@@ -124,7 +127,11 @@ verify_highest_opcode(_Config) ->
                     ok;
                 TooHigh ->
                     ct:fail({too_high_opcode_for_21,TooHigh})
-            end;
+            end,
+
+            %% Cover min/max for OTP 25.
+            10 = max(0, min(10, id(42))),
+            ok;
         _ ->
             ok
     end.
@@ -866,6 +873,10 @@ coverage(Config) when is_list(Config) ->
     %% Cover code in beam_ssa_bsm.
     {'EXIT',{{badarg,<<>>},_}} = catch coverage_beam_ssa_bsm_error(id(<<>>)),
 
+    %% Cover code for merging registers in beam_validator.
+    42 = coverage_beam_validator(id(fun() -> 42 end)),
+    ok = coverage_beam_validator(id(fun() -> throw(whatever) end)),
+
     ok.
 
 coverage_fold(Fun, Acc, <<H,T/binary>>) ->
@@ -1021,6 +1032,19 @@ coverage_beam_ssa_pre_codegen(<<V0:0, V1:(V0 div V0), _:(V0 bsl V1)/bits>>) ->
 
 coverage_beam_ssa_bsm_error(<<B/bitstring>>) ->
     B andalso ok.
+
+coverage_beam_validator(F) ->
+    coverage_beam_validator(ok, ok, ok,
+       try
+           F()
+       catch
+           <<V:ok/binary>> ->
+               V;
+           _ ->
+               ok
+       end).
+
+coverage_beam_validator(_, _, _, Result) -> Result.
 
 multiple_uses(Config) when is_list(Config) ->
     {344,62879,345,<<245,159,1,89>>} = multiple_uses_1(<<1,88,245,159,1,89>>),
@@ -1327,7 +1351,7 @@ match_string(Config) when is_list(Config) ->
     %% To make sure that native endian really is handled correctly
     %% (i.e. that the compiler does not attempt to use bs_match_string/4
     %% instructions for native segments), running this test is not enough.
-    %% Either examine the generated for do_match_string_native/1 or
+    %% Either examine the generated code for do_match_string_native/1 or
     %% check the coverage for the v3_kernel module.
     case erlang:system_info(endian) of
 	little ->
@@ -1345,6 +1369,14 @@ match_string(Config) when is_list(Config) ->
     plain = no_match_string_opt(<<"abc">>),
     strange = no_match_string_opt(<<$a:9,$b:9,$c:9>>),
 
+    d = do_match_string_tail(id(<<"d">>)),
+    dd = do_match_string_tail(id(<<"dd">>)),
+
+    a = do_match_string_var_size(id(<<"a">>), id(0)),
+    a = do_match_string_var_size(id(<<"ab">>), id(8)),
+    ab = do_match_string_var_size(id(<<"ab">>), id(0)),
+    ab = do_match_string_var_size(id(<<"abc">>), id(8)),
+
     ok.
 
 do_match_string_native(<<$a:16/native,$b:16/native>>) -> ok.
@@ -1359,7 +1391,13 @@ do_match_string_little_signed(<<(-1):16/little-signed>>) -> ok.
 
 no_match_string_opt(<<"abc">>) -> plain;
 no_match_string_opt(<<$a:9,$b:9,$c:9>>) -> strange.
-    
+
+%% GH-7259: Unsafe reordering of clauses. (The clauses must be on the
+%% same line to trigger this bug.)
+do_match_string_tail(<<"dd", _T/binary>>) -> dd; do_match_string_tail(<<"d", _T/binary>>) -> d.
+
+do_match_string_var_size(Bin, Size) ->
+    case Bin of <<"ab",_T:Size>> -> ab; <<"a",_T:Size>> -> a end.
 
 %% OTP-7591: A zero-width segment in matching would crash the compiler.
 
@@ -2705,6 +2743,8 @@ bs_match(_Config) ->
 
     {'EXIT',{{case_clause,_},_}} = catch do_bs_match_gh_6755(id(<<"1000">>)),
 
+    {'EXIT',{{badmatch,<<>>},_}} = catch do_bs_match_gh_7467(<<>>),
+
     ok.
 
 do_bs_match_1(_, X) ->
@@ -2775,6 +2815,9 @@ do_bs_match_gh_6755(B) ->
     case B of
         <<"b">> -> b
     end.
+
+do_bs_match_gh_7467(A) ->
+    do_bs_match_gh_7467(<<_:1/bits>> = A).
 
 %% GH-6348/OTP-18297: Allow aliases for binaries.
 -record(ba_foo, {a,b,c}).

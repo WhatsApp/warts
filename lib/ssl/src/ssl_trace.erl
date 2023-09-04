@@ -432,7 +432,7 @@ trace_profiles() ->
                         {client_hello_extensions, 10}, {cert_status_check, 5},
                         {get_ocsp_responder_list, 1}, {handle_ocsp_extension, 2},
                         {path_validation, 10},
-                        {handle_server_hello_extensions, 10},
+                        {handle_server_hello_extensions, 9},
                         {handle_client_hello_extensions, 10},
                         {cert_status_check, 5}]},
        {public_key, [{ocsp_extensions, 1}, {pkix_ocsp_validate, 5},
@@ -509,4 +509,43 @@ trace_profiles() ->
        {dtls_gen_connection,
         [{handle_info,3}]},
        {ssl_gen_statem,
-        [{hibernate_after, 3}, {handle_common_event, 4}]}]}].
+        [{hibernate_after, 3}, {handle_common_event, 4}]}]},
+     {ct, %% common_test
+      fun(M, F, A) -> dbg:tpl(M, F, A, x) end,
+      fun(M, F, A) -> dbg:ctpl(M, F, A) end,
+      [
+       %% {ct_test_support, %% module from test and not src folder, enable it manually if needed
+       %% [{run_ct_run_test, 2},
+       %%  {run_ct_script_start, 2},
+       %%  {run, 2},
+       %%  {init_per_suite, 2},
+       %%  {start_slave, 3}]},
+       {test_server, [
+                      {ts_tc, 3},
+                      {user_callback, 5},
+                      {fw_error_notify, 4},
+                      {get_loc, 1},
+                      {set_tc_state, 1},
+                      {init_per_testcase, 3},
+                      {run_test_case_msgloop, 1},
+                      {run_test_case_eval1, 6},
+                      {do_init_tc_call, 4},
+                      {process_return_val, 6},
+                      {do_end_tc_call, 4},
+                      {end_per_testcase, 3},
+                      {call_end_conf, 7},
+                      {do_call_end_conf, 7},
+                      {call_end_conf, 7},
+                      {handle_tc_exit, 2},
+                      {capture_start, 0},
+                      {capture_stop, 0},
+                      {capture_get, 0},
+                      {fail, 0},
+                      {fail, 1},
+                      {timetrap, 4},
+                      {start_node, 3},
+                      {comment, 1}
+                     ]}
+       %% ,{ct_util, [{mark_process, 0}]}
+      ]
+     }].

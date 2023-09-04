@@ -51,7 +51,9 @@ typedef struct erl_fun_entry {
  * environment. */
 
 typedef struct erl_fun_thing {
-    Eterm thing_word;       /* Subtag FUN_SUBTAG. */
+    /* The header contains FUN_SUBTAG, arity, number of free variables, and
+     * whether this is an external fun. */
+    Eterm thing_word;
 
     union {
         /* Both `ErlFunEntry` and `Export` begin with an `ErtsDispatchable`, so
@@ -59,26 +61,29 @@ typedef struct erl_fun_thing {
          * pointer to improve performance. */
         ErtsDispatchable *disp;
 
-        /* Pointer to function entry, valid iff `creator != am_external`.*/
+        /* Pointer to function entry, valid iff the external bit is clear.*/
         ErlFunEntry *fun;
 
-        /* Pointer to export entry, valid iff `creator == am_external`.*/
+        /* Pointer to export entry, valid iff the external bit is set.*/
         Export *exp;
     } entry;
 
     /* Next off-heap object, must be NULL when this is an external fun. */
     struct erl_off_heap_header *next;
 
-    byte arity;             /* The _apparent_ arity of the fun. */
-    byte num_free;          /* Number of free variables (in env). */
-
-    /* -- The following may be compound Erlang terms ---------------------- */
-    Eterm creator;          /* Pid of creator process (contains node). */
-    Eterm env[];            /* Environment (free variables). */
+    /* Environment (free variables), may be compound terms. */
+    Eterm env[];
 } ErlFunThing;
 
-#define is_local_fun(FunThing) ((FunThing)->creator != am_external)
-#define is_external_fun(FunThing) ((FunThing)->creator == am_external)
+#define is_external_fun(FunThing)                                             \
+    (!!(((FunThing)->thing_word >> FUN_HEADER_EXTERNAL_OFFS) & 1))
+#define is_local_fun(FunThing)                                                \
+    (!(is_external_fun(FunThing)))
+
+#define fun_arity(FunThing)                                                   \
+    (((FunThing)->thing_word >> FUN_HEADER_ARITY_OFFS) & 0xFF)
+#define fun_num_free(FunThing)                                                \
+    (((FunThing)->thing_word >> FUN_HEADER_NUM_FREE_OFFS) & 0xFF)
 
 /* ERL_FUN_SIZE does _not_ include space for the environment which is a
  * C99-style flexible array */

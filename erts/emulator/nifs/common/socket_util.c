@@ -1040,10 +1040,11 @@ void esock_encode_sockaddr_un(ErlNifEnv*          env,
     size_t       n, m;
 
     UDBG( ("SUTIL", "esock_encode_sockaddr_un -> entry with"
-           "\r\n.  addrLen: %d"
+           "\r\n   addrLen: %d"
            "\r\n", addrLen) );
 
     n = sockAddrP->sun_path - (char *)sockAddrP; // offsetof
+
     if (addrLen >= n) {
         n = addrLen - n; // sun_path length
         if (255 < n) {
@@ -1055,6 +1056,7 @@ void esock_encode_sockaddr_un(ErlNifEnv*          env,
             unsigned char *path;
 
             m = esock_strnlen(sockAddrP->sun_path, n);
+
 #ifdef __linux__
             /* Assume that the address is a zero terminated string,
              * except when the first byte is \0 i.e the string length is 0,
@@ -1066,6 +1068,8 @@ void esock_encode_sockaddr_un(ErlNifEnv*          env,
                 m = n;
             }
 #endif
+
+            UDBG( ("SUTIL", "esock_encode_sockaddr_un -> m: %d\r\n", m) );
 
             /* And finally build the 'path' attribute */
             path = enif_make_new_binary(env, m, &ePath);
@@ -2377,11 +2381,52 @@ ERL_NIF_TERM esock_errno_to_term(ErlNifEnv* env, int err)
         break;
 #endif
 
+#if defined(ERROR_NETNAME_DELETED)
+    case ERROR_NETNAME_DELETED:
+        return MKA(env, "netname_deleted");
+        break;
+#endif
+
+#if defined(ERROR_TOO_MANY_CMDS)
+        /* The network command limit has been reached */
+    case ERROR_TOO_MANY_CMDS:
+        return MKA(env, "too_many_cmds");
+        break;
+#endif        
+
+#if defined(ERROR_DUP_NAME)
+        /*  Not connected because a duplicate name exists on the network */
+    case ERROR_DUP_NAME:
+        return MKA(env, "duplicate_name");
+        break;
+#endif        
+
 #if defined(ERROR_MORE_DATA)
+        /*
+         * https://stackoverflow.com/questions/31883438/sockets-using-getqueuedcompletionstatus-and-error-more-data
+         */
     case ERROR_MORE_DATA:
         return MKA(env, "more_data");
         break;
 #endif
+
+#if defined(ERROR_NOT_FOUND)
+    case ERROR_NOT_FOUND:
+        return MKA(env, "not_found");
+        break;
+#endif
+
+#if defined(ERROR_NETWORK_UNREACHABLE)
+    case ERROR_NETWORK_UNREACHABLE:
+        return MKA(env, "network_unreachable");
+        break;
+#endif
+
+#if defined(ERROR_PORT_UNREACHABLE)
+    case ERROR_PORT_UNREACHABLE:
+        return MKA(env, "port_unreachable");
+        break;
+#endif        
 
     default:
         {

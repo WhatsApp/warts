@@ -76,8 +76,8 @@ will_succeed(erlang, Op, [LHS, RHS]=Args) when Op =:= 'div';
 will_succeed(erlang, 'bsr'=Op, [LHS, RHS]=Args) ->
     case {meet(LHS, #t_integer{}), meet(RHS, #t_integer{})} of
         {#t_integer{elements={_,_}}=LHS,
-         #t_integer{elements={Shift,_}}=RHS}
-          when is_integer(Shift), Shift >= 0 ->
+         #t_integer{elements={MinShift,_}}=RHS}
+          when is_integer(MinShift), MinShift >= 0 ->
             'yes';
         {#t_integer{}, #t_integer{}} ->
             fails_on_conflict(erlang, Op, Args);
@@ -86,8 +86,8 @@ will_succeed(erlang, 'bsr'=Op, [LHS, RHS]=Args) ->
     end;
 will_succeed(erlang, 'bsl'=Op, [LHS, RHS]=Args) ->
     case {meet(LHS, #t_integer{}), meet(RHS, #t_integer{})} of
-        {LHS, #t_integer{elements={Shift,_}}=RHS}
-          when is_integer(Shift), Shift < 64 ->
+        {LHS, #t_integer{elements={_,MaxShift}}=RHS}
+          when is_integer(MaxShift), MaxShift < 64 ->
             succeeds_if_smallish(LHS);
         {#t_integer{}, #t_integer{}} ->
             fails_on_conflict(erlang, Op, Args);
@@ -424,9 +424,24 @@ types(erlang, 'bsl', [_,_]=Args) ->
 types(erlang, 'bsr', [_,_]=Args) ->
     sub_unsafe(beam_bounds_type('bsr', #t_integer{}, Args),
                [#t_integer{}, #t_integer{}]);
-types(erlang, 'bnot', [_]=Args) ->
-    sub_unsafe(beam_bounds_type('bnot', #t_integer{}, Args),
-               [#t_integer{}]);
+types(erlang, 'bnot', [_]) ->
+    %% Calculating the tighest possible range for the result would
+    %% cause the type analysis pass to loop for a very long time for
+    %% code such as:
+    %%
+    %%     f(0) -> -1;
+    %%     f(N) -> abs(bnot f(N)).
+    %%
+    %% By calculating looser bounds and widening the range to `any` at
+    %% some suitable limit, convergence can be ensured (see
+    %% 8e5b1fbb16d186). However, that can cause a contradiction
+    %% between the ranges calculated by the type pass and by
+    %% beam_validator.
+    %%
+    %% Therefore, don't attempt to calculate a range now. Save the
+    %% range calculation for the opt_ranges pass (arith_type/2), which
+    %% is only run once.
+    sub_unsafe(#t_integer{}, [#t_integer{}]);
 
 %% Fixed-type arithmetic
 types(erlang, 'float', [_]) ->
@@ -465,6 +480,24 @@ types(erlang, Op, [LHS, RHS]) when Op =:= '+'; Op =:= '-' ->
                           number -> #t_number{elements=R}
                       end,
             sub_unsafe(RetType, [#t_number{}, #t_number{}]);
+        _ ->
+            mixed_arith_types([LHS, RHS])
+    end;
+
+types(erlang, '*', [LHS, RHS]) ->
+    case get_range(LHS, RHS, #t_number{}) of
+        {Type, {A,B}, {C,D}} ->
+            case beam_bounds:bounds('*', {A,B}, {C,D}) of
+                {Min,_Max} when is_integer(Min), Min >= 0 ->
+                    R = {Min,'+inf'},
+                    RetType = case Type of
+                                  integer -> #t_integer{elements=R};
+                                  number -> #t_number{elements=R}
+                              end,
+                    sub_unsafe(RetType, [#t_number{}, #t_number{}]);
+                _ ->
+                    mixed_arith_types([LHS, RHS])
+            end;
         _ ->
             mixed_arith_types([LHS, RHS])
     end;
@@ -547,6 +580,50 @@ types(erlang, 'spawn_monitor', [_, _, _]) ->
 types(erlang, 'spawn_request', [_ | _]=Args) when length(Args) =< 5 ->
     sub_unsafe(reference, [any || _ <- Args]);
 
+%% Conversion functions.
+types(erlang, atom_to_binary, [_]) ->
+    sub_safe(binary(), [#t_atom{}]);
+types(erlang, binary_to_integer, [_]) ->
+    sub_unsafe(#t_integer{}, [binary()]);
+types(erlang, binary_to_list, [_]) ->
+    sub_safe(proper_list(), [binary()]);
+types(erlang, integer_to_list, [_]) ->
+    sub_safe(proper_cons(), [#t_integer{}]);
+types(erlang, list_to_atom, [_]) ->
+    sub_unsafe(#t_atom{}, [#t_list{}]);
+types(erlang, list_to_tuple, [Arg]) ->
+    Sz = case meet(Arg, #t_list{}) of
+             #t_cons{} -> 1;
+             _ -> 0
+         end,
+    sub_unsafe(#t_tuple{size=Sz}, [#t_list{}]);
+types(erlang, term_to_binary, [_]) ->
+    sub_unsafe(binary(), [any]);
+types(erlang, tuple_to_list, [Arg]) ->
+    T = case meet(Arg, #t_tuple{}) of
+            #t_tuple{size=Sz} when Sz >= 1 ->
+                proper_cons();
+            _ ->
+                proper_list()
+        end,
+    sub_safe(T, [#t_tuple{}]);
+
+%% Misc functions returning integers.
+types(erlang, convert_time_unit, [_, _, _]) ->
+    sub_unsafe(#t_integer{}, [any, any, any]);
+types(erlang, monotonic_time, []) ->
+    sub_unsafe(#t_integer{}, []);
+types(erlang, phash2, [_]) ->
+    R = {0, (1 bsl 27) - 1},
+    sub_unsafe(#t_integer{elements=R}, [any]);
+types(erlang, phash2, [_, _]) ->
+    R = {0, (1 bsl 32) - 1},
+    sub_unsafe(#t_integer{elements=R}, [any, any]);
+types(erlang, unique_integer, []) ->
+    sub_unsafe(#t_integer{}, []);
+types(erlang, unique_integer, [_]) ->
+    sub_unsafe(#t_integer{}, [any]);
+
 %% Misc ops.
 types(erlang, 'binary_part', [_, _]) ->
     PosLen = make_two_tuple(#t_integer{}, #t_integer{}),
@@ -575,6 +652,13 @@ types(erlang, self, []) ->
 types(erlang, 'size', [_]) ->
     ArgType = join(#t_tuple{}, #t_bitstring{}),
     sub_unsafe(#t_integer{}, [ArgType]);
+types(erlang, split_binary, [_, _]) ->
+    %% Note that, contrary to the documentation at the time of writing,
+    %% split_binary/2 accepts a bitstring and that it can return a
+    %% bitstring in the second element of the result tuple.
+    Binary = binary(),
+    T = make_two_tuple(Binary, #t_bitstring{}),
+    sub_unsafe(T, [#t_bitstring{}, #t_integer{}]);
 
 %% Tuple element ops
 types(erlang, element, [Pos, Tuple0]) ->
@@ -618,25 +702,61 @@ types(erlang, make_fun, [_,_,Arity0]) ->
            end,
     sub_unsafe(Type, [#t_atom{}, #t_atom{}, #t_integer{}]);
 
-types(erlang, Op, [LHS,RHS]) when Op =:= min; Op =:= max ->
-    R1 = get_range(LHS),
-    R2 = get_range(RHS),
-    R = beam_bounds:bounds(Op, R1, R2),
-
-    %% We cannot use mixed_arith_types/1 here as we will return either argument
-    %% unchanged. The result will not be converted to a float if one of the
-    %% arguments is a float.
-    %%
-    %%   1235.0 = 1 + 1234.0
-    %%   1 = erlang:min(1, 1234.0)
+types(erlang, min, [LHS,RHS]) ->
+    R1 = case get_range(meet(LHS, #t_number{})) of
+             none -> any;
+             R10 -> R10
+         end,
+    R2 = case get_range(meet(RHS, #t_number{})) of
+             none -> any;
+             R20 -> R20
+         end,
+    R = beam_bounds:bounds(min, R1, R2),
     RetType = case {LHS, RHS} of
-                  {#t_integer{}, #t_integer{}} -> #t_integer{elements=R};
-                  {#t_integer{}, #t_number{}} -> #t_number{elements=R};
-                  {#t_number{}, #t_integer{}} -> #t_number{elements=R};
-                  {#t_number{}, #t_number{}} -> #t_number{elements=R};
-                  {_, _} -> join(LHS, RHS)
+                  {#t_integer{}, #t_integer{}} ->
+                      #t_integer{elements=R};
+                  {#t_integer{}, _} ->
+                      #t_number{elements=R};
+                  {#t_number{}, _} ->
+                      #t_number{elements=R};
+                  {#t_float{}, _} ->
+                      #t_number{elements=R};
+                  {_, #t_integer{}} ->
+                      #t_number{elements=R};
+                  {_, #t_number{}} ->
+                      #t_number{elements=R};
+                  {_, #t_float{}} ->
+                      #t_number{elements=R};
+                  {_, _} ->
+                      join(LHS, RHS)
               end,
+    sub_unsafe(RetType, [any, any]);
 
+types(erlang, max, [LHS,RHS]) ->
+    RetType =
+        case get_range(LHS, RHS, #t_number{}) of
+            {_, none, _} ->
+                join(LHS, RHS);
+            {_, _, none} ->
+                join(LHS, RHS);
+            {_, R1, R2} ->
+                R = beam_bounds:bounds(max, R1, R2),
+                case {LHS, RHS} of
+                    {#t_integer{}, #t_integer{}} ->
+                        #t_integer{elements=R};
+                    {any, #t_integer{elements={Min,_}}} when is_integer(Min) ->
+                        beam_types:subtract(any, #t_number{elements={'-inf',Min}});
+                    {#t_integer{elements={Min,_}}, any} when is_integer(Min) ->
+                        beam_types:subtract(any, #t_number{elements={'-inf',Min}});
+                    {_, _} ->
+                        case join(LHS, RHS) of
+                            #t_number{} ->
+                                #t_number{elements=R};
+                            Join ->
+                                Join
+                        end
+                end
+        end,
     sub_unsafe(RetType, [any, any]);
 
 types(erlang, Name, Args) ->
@@ -1103,17 +1223,6 @@ beam_bounds_type(Op, Type, [LHS, RHS]) ->
             #t_integer{elements=beam_bounds:bounds(Op, R1, R2)};
         {number, R1, R2} ->
             #t_number{elements=beam_bounds:bounds(Op, R1, R2)}
-    end;
-beam_bounds_type(Op, Type, [Arg]) ->
-    case beam_types:meet(Arg, Type) of
-        #t_float{elements=R} ->
-            #t_float{elements=beam_bounds:bounds(Op, R)};
-        #t_integer{elements=R} ->
-            #t_integer{elements=beam_bounds:bounds(Op, R)};
-        #t_number{elements=R} ->
-            #t_number{elements=beam_bounds:bounds(Op, R)};
-        none ->
-            none
     end.
 
 get_range(LHS, RHS, Type) ->
@@ -1343,6 +1452,9 @@ proper_list() ->
 
 proper_list(ElementType) ->
     #t_list{type=ElementType,terminator=nil}.
+
+binary() ->
+    #t_bitstring{size_unit=8}.
 
 %% Constructs a new list type based on another, optionally keeping the same
 %% length and/or making it proper.

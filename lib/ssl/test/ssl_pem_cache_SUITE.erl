@@ -512,7 +512,7 @@ new_root_pem_helper(Config, CleanMode,
     %% ConnectedN - state after establishing Nth connection
     %% Cleaned - state after periodical cleanup
     %% DisconnectedN - state after closing Nth connection
-    ?CT_PAL(">>> IntermediateServerKeyId = ~w", [IntermediateServerKeyId]),
+    ?CT_LOG(">>> IntermediateServerKeyId = ~w", [IntermediateServerKeyId]),
     {ServerCAFile, ClientConf0, ServerConf, ServerRootCert0, ClientBase, ServerBase} =
         create_initial_config(Config),
 
@@ -778,10 +778,18 @@ pem_periodical_cleanup(Config, FileIds,
         try
             Cleaned = get_table_sizes(),
             [{pem_cache, PemCacheData1}, _, _, _] = get_tables(),
-            IsSame = PemCacheData1 == PemCacheData0,
             check_tables([{pem_cache, PemCacheData1}, {cert, CertData0}, {ca_ref_cnt, CaRefCntData0},
                           {ca_file_ref, CaFileRefData0}]),
-            [true = lists:member(Row, PemCacheData0) || Row <- PemCacheData1],
+
+            [] = [{missing, Row} || Row <- PemCacheData1,
+                                    not lists:member(Row, PemCacheData0)],
+            case IsSame of
+                true ->
+                    [] = PemCacheData0 -- PemCacheData1;
+                _ ->
+                    ok
+            end,
+
             %% restore original mtime attributes
             [ok = file:write_file_info(C, F#file_info{mtime = OT}) ||
                 {C, F, OT} <- Memory],
@@ -789,8 +797,8 @@ pem_periodical_cleanup(Config, FileIds,
             [ssl_test_lib:close(A) || A <- [Server, Client]],
             Disconnected = get_table_sizes(),
             ok
-        catch _:Reason ->
-                Reason
+        catch _:Reason:ST ->
+                {Reason,ST}
         end,
     case Result of
         ok ->

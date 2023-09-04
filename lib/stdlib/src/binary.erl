@@ -108,7 +108,8 @@ bin_to_list(Subject, Pos, Len) ->
     badarg_with_info([Subject, Pos, Len]).
 
 -spec compile_pattern(Pattern) -> cp() when
-      Pattern :: binary() | [binary()].
+      Pattern :: PatternBinary | [PatternBinary,...],
+      PatternBinary :: nonempty_binary().
 
 compile_pattern(_) ->
     erlang:nif_error(undef).
@@ -173,20 +174,21 @@ list_to_bin(_) ->
     erlang:nif_error(undef).
 
 -spec longest_common_prefix(Binaries) -> non_neg_integer() when
-      Binaries :: [binary()].
+      Binaries :: [binary(),...].
 
 longest_common_prefix(_) ->
     erlang:nif_error(undef).
 
 -spec longest_common_suffix(Binaries) -> non_neg_integer() when
-      Binaries :: [binary()].
+      Binaries :: [binary(),...].
 
 longest_common_suffix(_) ->
     erlang:nif_error(undef).
 
 -spec match(Subject, Pattern) -> Found | nomatch when
       Subject :: binary(),
-      Pattern :: binary() | [binary()] | cp(),
+      Pattern :: PatternBinary | [PatternBinary,...] | cp(),
+      PatternBinary :: nonempty_binary(),
       Found :: part().
 
 match(_, _) ->
@@ -194,7 +196,8 @@ match(_, _) ->
 
 -spec match(Subject, Pattern, Options) -> Found | nomatch when
       Subject :: binary(),
-      Pattern :: binary() | [binary()] | cp(),
+      Pattern :: PatternBinary | [PatternBinary,...] | cp(),
+      PatternBinary :: nonempty_binary(),
       Found :: part(),
       Options :: [Option],
       Option :: {scope, part()}.
@@ -204,7 +207,8 @@ match(_, _, _) ->
 
 -spec matches(Subject, Pattern) -> Found when
       Subject :: binary(),
-      Pattern :: binary() | [binary()] | cp(),
+      Pattern :: PatternBinary | [PatternBinary,...] | cp(),
+      PatternBinary :: nonempty_binary(),
       Found :: [part()].
 
 matches(_, _) ->
@@ -212,7 +216,8 @@ matches(_, _) ->
 
 -spec matches(Subject, Pattern, Options) -> Found when
       Subject :: binary(),
-      Pattern :: binary() | [binary()] | cp(),
+      Pattern :: PatternBinary | [PatternBinary,...] | cp(),
+      PatternBinary :: nonempty_binary(),
       Found :: [part()],
       Options :: [Option],
       Option :: {scope, part()}.
@@ -243,7 +248,8 @@ referenced_byte_size(_) ->
 
 -spec split(Subject, Pattern) -> Parts when
       Subject :: binary(),
-      Pattern :: binary() | [binary()] | cp(),
+      Pattern :: PatternBinary | [PatternBinary,...] | cp(),
+      PatternBinary :: nonempty_binary(),
       Parts :: [binary()].
 
 split(_, _) ->
@@ -251,7 +257,8 @@ split(_, _) ->
 
 -spec split(Subject, Pattern, Options) -> Parts when
       Subject :: binary(),
-      Pattern :: binary() | [binary()] | cp(),
+      Pattern :: PatternBinary | [PatternBinary,...] | cp(),
+      PatternBinary :: nonempty_binary(),
       Options :: [Option],
       Option :: {scope, part()} | trim | global | trim_all,
       Parts :: [binary()].
@@ -267,8 +274,9 @@ split(_, _, _) ->
 
 -spec replace(Subject, Pattern, Replacement) -> Result when
       Subject :: binary(),
-      Pattern :: binary() | [ binary() ] | cp(),
-      Replacement :: binary(),
+      Pattern :: PatternBinary | [PatternBinary,...] | cp(),
+      PatternBinary :: nonempty_binary(),
+      Replacement :: binary() | fun((binary()) -> binary()),
       Result :: binary().
 
 replace(H,N,R) ->
@@ -281,8 +289,9 @@ replace(H,N,R) ->
 
 -spec replace(Subject, Pattern, Replacement, Options) -> Result when
       Subject :: binary(),
-      Pattern :: binary() | [ binary() ] | cp(),
-      Replacement :: binary(),
+      Pattern :: PatternBinary | [PatternBinary,...] | cp(),
+      PatternBinary :: nonempty_binary(),
+      Replacement :: binary() | fun((binary()) -> binary()),
       Options :: [Option],
       Option :: global | {scope, part()} | {insert_replaced, InsPos},
       InsPos :: OnePos | [ OnePos ],
@@ -291,7 +300,7 @@ replace(H,N,R) ->
 
 replace(Haystack,Needles,Replacement,Options) ->
     try
-	true = is_binary(Replacement), % Make badarg instead of function clause
+	true = is_binary(Replacement) orelse is_function(Replacement, 1), % Make badarg instead of function clause
 	{Part,Global,Insert} = get_opts_replace(Options,{no,false,[]}),
 	Moptlist = case Part of
 		       no ->
@@ -308,13 +317,17 @@ replace(Haystack,Needles,Replacement,Options) ->
 			    Match -> [Match]
 			end
 		end,
-	ReplList = case Insert of
+	ReplList = case is_function(Replacement, 1) orelse Insert of
+		       true ->
+ 			    Replacement;
 		       [] ->
-			   Replacement;
+			   fun(_) -> Replacement end;
 		       Y when is_integer(Y) ->
-			   splitat(Replacement,0,[Y]);
+			   <<ReplFront:Y/binary, ReplRear/binary>> = Replacement,
+			   fun(M) -> [ReplFront, M, ReplRear] end;
 		       Li when is_list(Li) ->
-			   splitat(Replacement,0,lists:sort(Li))
+			   Splits = splitat(Replacement,0,lists:sort(Li)),
+			   fun(M) -> lists:join(M, Splits) end
 		   end,
 	erlang:iolist_to_binary(do_replace(Haystack,MList,ReplList,0))
    catch
@@ -328,19 +341,7 @@ replace(Haystack,Needles,Replacement,Options) ->
 do_replace(H,[],_,N) ->
     [binary:part(H,{N,byte_size(H)-N})];
 do_replace(H,[{A,B}|T],Replacement,N) ->
-    [binary:part(H,{N,A-N}),
-     if
-	 is_list(Replacement) ->
-	     do_insert(Replacement, binary:part(H,{A,B}));
-	 true ->
-	     Replacement
-     end
-     | do_replace(H,T,Replacement,A+B)].
-
-do_insert([X],_) ->
-    [X];
-do_insert([H|T],R) ->
-    [H,R|do_insert(T,R)].
+    [binary:part(H,{N,A-N}), Replacement(binary:part(H, {A, B})) | do_replace(H,T,Replacement,A+B)].
 
 splitat(H,N,[]) ->
     [binary:part(H,{N,byte_size(H)-N})];

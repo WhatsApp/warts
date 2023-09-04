@@ -243,6 +243,7 @@ struct BeamModuleAssemblerCommon {
             return BeamTypeId::Tuple;
         default:
             ERTS_ASSERT(!"tag_val_def error");
+            return BeamTypeId::None; /* Avoid warning */
         }
     }
 
@@ -616,17 +617,19 @@ Eterm beam_jit_bs_get_integer(Process *c_p,
                               Uint Live);
 
 ErtsMessage *beam_jit_decode_dist(Process *c_p, ErtsMessage *msgp);
-Sint beam_jit_remove_message(Process *c_p,
-                             Sint FCALLS,
-                             Eterm *HTOP,
-                             Eterm *E,
-                             Uint32 active_code_ix);
+Sint32 beam_jit_remove_message(Process *c_p,
+                               Sint32 FCALLS,
+                               Eterm *HTOP,
+                               Eterm *E,
+                               Uint32 active_code_ix);
 
 void beam_jit_bs_construct_fail_info(Process *c_p,
                                      Uint packed_error_info,
                                      Eterm arg3,
                                      Eterm arg1);
 Sint beam_jit_bs_bit_size(Eterm term);
+
+Eterm beam_jit_int128_to_big(Process *p, Uint sign, Uint low, Uint high);
 
 void beam_jit_take_receive_lock(Process *c_p);
 void beam_jit_wait_locked(Process *c_p, ErtsCodePtr cp);

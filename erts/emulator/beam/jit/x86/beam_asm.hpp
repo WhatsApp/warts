@@ -93,7 +93,7 @@ protected:
 #endif
 
     const x86::Gp c_p = x86::r13;
-    const x86::Gp FCALLS = x86::r14;
+    const x86::Gp FCALLS = x86::r14d;
     const x86::Gp HTOP = x86::r15;
 
     /* Local copy of the active code index.
@@ -690,7 +690,7 @@ protected:
         }
 
         if (Spec & Update::eReductions) {
-            a.mov(x86::qword_ptr(c_p, offsetof(Process, fcalls)), FCALLS);
+            a.mov(x86::dword_ptr(c_p, offsetof(Process, fcalls)), FCALLS);
         }
 
 #ifdef NATIVE_ERLANG_STACK
@@ -747,7 +747,7 @@ protected:
         }
 
         if (Spec & Update::eReductions) {
-            a.mov(FCALLS, x86::qword_ptr(c_p, offsetof(Process, fcalls)));
+            a.mov(FCALLS, x86::dword_ptr(c_p, offsetof(Process, fcalls)));
         }
 
         if (Spec & Update::eCodeIndex) {
@@ -1196,8 +1196,7 @@ protected:
     x86::Mem emit_fixed_apply(const ArgWord &arity, bool includeI);
 
     x86::Gp emit_call_fun(bool skip_box_test = false,
-                          bool skip_fun_test = false,
-                          bool skip_arity_test = false);
+                          bool skip_header_test = false);
 
     void emit_is_boxed(Label Fail, x86::Gp Src, Distance dist = dLong) {
         BeamAssembler::emit_is_boxed(Fail, Src, dist);

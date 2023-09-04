@@ -35,7 +35,8 @@
  * esock_dbg_printf("DEMONP", "[%d] %s: %T\r\n",
  *                  descP->sock, slogan,
  *                  esock_make_monitor_term(env, &mon));
- *
+ * ESOCK_PRINTF("foobar: %d\r\n", foo);
+ * ESOCK_EPRINTF("foobar: %d\r\n", foo);
  */
 
 #define STATIC_ERLANG_NIF 1
@@ -140,17 +141,19 @@ ERL_NIF_INIT(prim_socket, esock_funcs, on_load, NULL, NULL, NULL)
 #include <Ws2tcpip.h>
 
 /* Visual studio 2008+: NTDDI_VERSION needs to be set for iphlpapi.h
- * to define the right structures. It needs to be set to WINXP (or LONGHORN)
- * for IPV6 to work and it's set lower by default, so we need to change it.
+ * to define the right structures.
+ * It needs to be set higher for IPV6 to work and it's set lower by default,
+ * so we need to change it.
  */
 #ifdef HAVE_SDKDDKVER_H
 #  include <sdkddkver.h>
 #  ifdef NTDDI_VERSION
 #    undef NTDDI_VERSION
 #  endif
-#  define NTDDI_VERSION NTDDI_WINXP
+#  define NTDDI_VERSION NTDDI_WIN10_RS2
 #endif
 #include <iphlpapi.h>
+#include <mstcpip.h>
 
 #undef WANT_NONBLOCKING
 #include "sys.h"
@@ -452,7 +455,11 @@ static void (*esock_sctp_freepaddrs)(struct sockaddr *addrs) = NULL;
 
 
 #define ESOCK_RECV_BUFFER_COUNT_DEFAULT     0
-#define ESOCK_RECV_BUFFER_SIZE_DEFAULT      8192
+#if defined(__WIN32__)
+#define ESOCK_RECV_BUFFER_SIZE_DEFAULT      (32*1024)
+#else
+#define ESOCK_RECV_BUFFER_SIZE_DEFAULT      (8*1024)
+#endif
 #define ESOCK_RECV_CTRL_BUFFER_SIZE_DEFAULT 1024
 #define ESOCK_SEND_CTRL_BUFFER_SIZE_DEFAULT 1024
 
@@ -1401,6 +1408,17 @@ static ERL_NIF_TERM esock_setopt_so_bindtodevice(ErlNifEnv*       env,
                                                  ERL_NIF_TERM     eVal);
 #endif
 
+#if defined(SO_BSP_STATE)
+static ERL_NIF_TERM esock_getopt_bsp_state(ErlNifEnv*       env,
+                                           ESockDescriptor* descP,
+                                           int              level,
+                                           int              opt);
+static ERL_NIF_TERM esock_encode_bsp_state_socket_address(ErlNifEnv*      env,
+                                                          SOCKET_ADDRESS* addr);
+static ERL_NIF_TERM esock_encode_bsp_state_type(ErlNifEnv*     env, int type);
+static ERL_NIF_TERM esock_encode_bsp_state_protocol(ErlNifEnv* env, int proto);
+#endif
+
 #if defined(SO_LINGER)
 static
 ERL_NIF_TERM esock_setopt_linger(ErlNifEnv*       env,
@@ -1945,13 +1963,22 @@ static const struct in6_addr in6addr_loopback =
     GLOBAL_ATOM_DECL(bindtodevice);                    \
     GLOBAL_ATOM_DECL(block_source);                    \
     GLOBAL_ATOM_DECL(broadcast);                       \
+    GLOBAL_ATOM_DECL(bsp_state);                       \
     GLOBAL_ATOM_DECL(busy_poll);                       \
+    GLOBAL_ATOM_DECL(bytes_in);                        \
+    GLOBAL_ATOM_DECL(bytes_in_flight);                 \
+    GLOBAL_ATOM_DECL(bytes_out);                       \
+    GLOBAL_ATOM_DECL(bytes_reordered);                 \
+    GLOBAL_ATOM_DECL(bytes_retrans);                   \
     GLOBAL_ATOM_DECL(cancel);                          \
+    GLOBAL_ATOM_DECL(cancelled);                       \
     GLOBAL_ATOM_DECL(cantconfig);		       \
     GLOBAL_ATOM_DECL(chaos);                           \
     GLOBAL_ATOM_DECL(checksum);                        \
     GLOBAL_ATOM_DECL(close);                           \
     GLOBAL_ATOM_DECL(closed);                          \
+    GLOBAL_ATOM_DECL(close_wait);                      \
+    GLOBAL_ATOM_DECL(closing);                         \
     GLOBAL_ATOM_DECL(cmsg_cloexec);                    \
     GLOBAL_ATOM_DECL(command);                         \
     GLOBAL_ATOM_DECL(completion);                      \
@@ -1961,12 +1988,14 @@ static const struct in6_addr in6addr_loopback =
     GLOBAL_ATOM_DECL(connect);                         \
     GLOBAL_ATOM_DECL(connected);                       \
     GLOBAL_ATOM_DECL(connecting);                      \
+    GLOBAL_ATOM_DECL(connection_time);                 \
     GLOBAL_ATOM_DECL(context);                         \
     GLOBAL_ATOM_DECL(cork);                            \
     GLOBAL_ATOM_DECL(counters);                        \
     GLOBAL_ATOM_DECL(credentials);                     \
     GLOBAL_ATOM_DECL(ctrl);                            \
     GLOBAL_ATOM_DECL(ctrunc);                          \
+    GLOBAL_ATOM_DECL(cwnd);                            \
     GLOBAL_ATOM_DECL(data);                            \
     GLOBAL_ATOM_DECL(data_size);                       \
     GLOBAL_ATOM_DECL(debug);                           \
@@ -1985,6 +2014,7 @@ static const struct in6_addr in6addr_loopback =
     GLOBAL_ATOM_DECL(drop_source_membership);          \
     GLOBAL_ATOM_DECL(dstopts);                         \
     GLOBAL_ATOM_DECL(dup);                             \
+    GLOBAL_ATOM_DECL(dup_acks_in);                     \
     GLOBAL_ATOM_DECL(dying);			       \
     GLOBAL_ATOM_DECL(dynamic);                         \
     GLOBAL_ATOM_DECL(echo);                            \
@@ -1997,14 +2027,19 @@ static const struct in6_addr in6addr_loopback =
     GLOBAL_ATOM_DECL(errqueue);                        \
     GLOBAL_ATOM_DECL(esp_network_level);               \
     GLOBAL_ATOM_DECL(esp_trans_level);                 \
+    GLOBAL_ATOM_DECL(established);                     \
     GLOBAL_ATOM_DECL(ether);                           \
     GLOBAL_ATOM_DECL(eui64);                           \
     GLOBAL_ATOM_DECL(events);                          \
+    GLOBAL_ATOM_DECL(exclusiveaddruse);                \
     GLOBAL_ATOM_DECL(explicit_eor);                    \
     GLOBAL_ATOM_DECL(faith);                           \
     GLOBAL_ATOM_DECL(false);                           \
     GLOBAL_ATOM_DECL(family);                          \
     GLOBAL_ATOM_DECL(fastroute);                       \
+    GLOBAL_ATOM_DECL(fast_retrans);                    \
+    GLOBAL_ATOM_DECL(fin_wait_1);                      \
+    GLOBAL_ATOM_DECL(fin_wait_2);                      \
     GLOBAL_ATOM_DECL(flags);                           \
     GLOBAL_ATOM_DECL(flowinfo);                        \
     GLOBAL_ATOM_DECL(fragment_interleave);             \
@@ -2037,6 +2072,7 @@ static const struct in6_addr in6addr_loopback =
     GLOBAL_ATOM_DECL(ip);                              \
     GLOBAL_ATOM_DECL(ipcomp_level);                    \
     GLOBAL_ATOM_DECL(ipip);                            \
+    GLOBAL_ATOM_DECL(iplevel);                         \
     GLOBAL_ATOM_DECL(ipv6);                            \
     GLOBAL_ATOM_DECL(irq);                             \
     GLOBAL_ATOM_DECL(i_want_mapped_v4_addr);           \
@@ -2047,13 +2083,15 @@ static const struct in6_addr in6addr_loopback =
     GLOBAL_ATOM_DECL(keepintvl);                       \
     GLOBAL_ATOM_DECL(kernel);                          \
     GLOBAL_ATOM_DECL(knowsepoch);		       \
+    GLOBAL_ATOM_DECL(last_ack);                        \
     GLOBAL_ATOM_DECL(leave_group);                     \
     GLOBAL_ATOM_DECL(level);                           \
     GLOBAL_ATOM_DECL(linger);                          \
     GLOBAL_ATOM_DECL(link);                            \
-    GLOBAL_ATOM_DECL(link0);                            \
-    GLOBAL_ATOM_DECL(link1);                            \
-    GLOBAL_ATOM_DECL(link2);                            \
+    GLOBAL_ATOM_DECL(link0);                           \
+    GLOBAL_ATOM_DECL(link1);                           \
+    GLOBAL_ATOM_DECL(link2);                           \
+    GLOBAL_ATOM_DECL(listen);                          \
     GLOBAL_ATOM_DECL(local);                           \
     GLOBAL_ATOM_DECL(localtlk);                        \
     GLOBAL_ATOM_DECL(local_auth_chunks);               \
@@ -2062,17 +2100,22 @@ static const struct in6_addr in6addr_loopback =
     GLOBAL_ATOM_DECL(lower_up);                        \
     GLOBAL_ATOM_DECL(mark);                            \
     GLOBAL_ATOM_DECL(master);                          \
+    GLOBAL_ATOM_DECL(max);                             \
     GLOBAL_ATOM_DECL(maxburst);                        \
+    GLOBAL_ATOM_DECL(maxdg);                           \
     GLOBAL_ATOM_DECL(maxseg);                          \
+    GLOBAL_ATOM_DECL(max_msg_size);                    \
     GLOBAL_ATOM_DECL(md5sig);                          \
     GLOBAL_ATOM_DECL(mem_end);                         \
     GLOBAL_ATOM_DECL(mem_start);                       \
     GLOBAL_ATOM_DECL(metricom);                        \
     GLOBAL_ATOM_DECL(mincost);                         \
     GLOBAL_ATOM_DECL(minttl);                          \
+    GLOBAL_ATOM_DECL(min_rtt);                         \
     GLOBAL_ATOM_DECL(monitor);			       \
     GLOBAL_ATOM_DECL(more);                            \
     GLOBAL_ATOM_DECL(msfilter);                        \
+    GLOBAL_ATOM_DECL(mss);                             \
     GLOBAL_ATOM_DECL(mtu);                             \
     GLOBAL_ATOM_DECL(mtu_discover);                    \
     GLOBAL_ATOM_DECL(multicast);                       \
@@ -2105,7 +2148,9 @@ static const struct in6_addr in6addr_loopback =
     GLOBAL_ATOM_DECL(num_unexpected_writes);           \
     GLOBAL_ATOM_DECL(num_unknown_cmds);                \
     GLOBAL_ATOM_DECL(oactive);			       \
+    GLOBAL_ATOM_DECL(off);                             \
     GLOBAL_ATOM_DECL(ok);                              \
+    GLOBAL_ATOM_DECL(on);                              \
     GLOBAL_ATOM_DECL(oob);                             \
     GLOBAL_ATOM_DECL(oobinline);                       \
     GLOBAL_ATOM_DECL(options);                         \
@@ -2141,6 +2186,8 @@ static const struct in6_addr in6addr_loopback =
     GLOBAL_ATOM_DECL(rcvbufforce);                     \
     GLOBAL_ATOM_DECL(rcvlowat);                        \
     GLOBAL_ATOM_DECL(rcvtimeo);                        \
+    GLOBAL_ATOM_DECL(rcv_buf);                         \
+    GLOBAL_ATOM_DECL(rcv_wnd);                         \
     GLOBAL_ATOM_DECL(rdm);                             \
     GLOBAL_ATOM_DECL(read_byte);                       \
     GLOBAL_ATOM_DECL(read_fails);                      \
@@ -2167,9 +2214,11 @@ static const struct in6_addr in6addr_loopback =
     GLOBAL_ATOM_DECL(reuseaddr);                       \
     GLOBAL_ATOM_DECL(reuseport);                       \
     GLOBAL_ATOM_DECL(rights);                          \
+    GLOBAL_ATOM_DECL(rm);                              \
     GLOBAL_ATOM_DECL(router_alert);                    \
     GLOBAL_ATOM_DECL(rthdr);                           \
     GLOBAL_ATOM_DECL(rtoinfo);                         \
+    GLOBAL_ATOM_DECL(rtt);                             \
     GLOBAL_ATOM_DECL(running);                         \
     GLOBAL_ATOM_DECL(rxq_ovfl);                        \
     GLOBAL_ATOM_DECL(scope_id);                        \
@@ -2201,6 +2250,7 @@ static const struct in6_addr in6addr_loopback =
     GLOBAL_ATOM_DECL(sndbufforce);                     \
     GLOBAL_ATOM_DECL(sndlowat);                        \
     GLOBAL_ATOM_DECL(sndtimeo);                        \
+    GLOBAL_ATOM_DECL(snd_wnd);                         \
     GLOBAL_ATOM_DECL(sockaddr);                        \
     GLOBAL_ATOM_DECL(socket);                          \
     GLOBAL_ATOM_DECL(spec_dst);                        \
@@ -2209,6 +2259,9 @@ static const struct in6_addr in6addr_loopback =
     GLOBAL_ATOM_DECL(status);                          \
     GLOBAL_ATOM_DECL(stream);                          \
     GLOBAL_ATOM_DECL(syncnt);                          \
+    GLOBAL_ATOM_DECL(syn_rcvd);                        \
+    GLOBAL_ATOM_DECL(syn_retrans);                     \
+    GLOBAL_ATOM_DECL(syn_sent);                        \
     GLOBAL_ATOM_DECL(tclass);                          \
     GLOBAL_ATOM_DECL(tcp);                             \
     GLOBAL_ATOM_DECL(throughput);                      \
@@ -2216,6 +2269,9 @@ static const struct in6_addr in6addr_loopback =
     GLOBAL_ATOM_DECL(tos);                             \
     GLOBAL_ATOM_DECL(transparent);                     \
     GLOBAL_ATOM_DECL(timeout);                         \
+    GLOBAL_ATOM_DECL(timeout_episodes);                \
+    GLOBAL_ATOM_DECL(timestamp_enabled);               \
+    GLOBAL_ATOM_DECL(time_wait);                       \
     GLOBAL_ATOM_DECL(true);                            \
     GLOBAL_ATOM_DECL(trunc);                           \
     GLOBAL_ATOM_DECL(ttl);                             \
@@ -2275,6 +2331,7 @@ ERL_NIF_TERM esock_atom_socket_tag; // This has a "special" name ('$socket')
     LOCAL_ATOM_DECL(adm_prohibited);   \
     LOCAL_ATOM_DECL(association);      \
     LOCAL_ATOM_DECL(assoc_id);         \
+    LOCAL_ATOM_DECL(atmark);           \
     LOCAL_ATOM_DECL(authentication);   \
     LOCAL_ATOM_DECL(boolean);          \
     LOCAL_ATOM_DECL(bound);	       \
@@ -2324,6 +2381,7 @@ ERL_NIF_TERM esock_atom_socket_tag; // This has a "special" name ('$socket')
     LOCAL_ATOM_DECL(io_backend);       \
     LOCAL_ATOM_DECL(io_num_threads);   \
     LOCAL_ATOM_DECL(listening);	       \
+    LOCAL_ATOM_DECL(local_addr);       \
     LOCAL_ATOM_DECL(local_rwnd);       \
     LOCAL_ATOM_DECL(map);              \
     LOCAL_ATOM_DECL(max);              \
@@ -2344,6 +2402,9 @@ ERL_NIF_TERM esock_atom_socket_tag; // This has a "special" name ('$socket')
     LOCAL_ATOM_DECL(none);             \
     LOCAL_ATOM_DECL(noroute);          \
     LOCAL_ATOM_DECL(not_neighbour);    \
+    LOCAL_ATOM_DECL(nread);            \
+    LOCAL_ATOM_DECL(nspace);           \
+    LOCAL_ATOM_DECL(nwrite);           \
     LOCAL_ATOM_DECL(null);             \
     LOCAL_ATOM_DECL(num_acceptors);    \
     LOCAL_ATOM_DECL(num_cnt_bits);     \
@@ -2378,6 +2439,9 @@ ERL_NIF_TERM esock_atom_socket_tag; // This has a "special" name ('$socket')
     LOCAL_ATOM_DECL(port_unreach);     \
     LOCAL_ATOM_DECL(probe);            \
     LOCAL_ATOM_DECL(protocols);        \
+    LOCAL_ATOM_DECL(rcvall);           \
+    LOCAL_ATOM_DECL(rcvall_igmpmcast); \
+    LOCAL_ATOM_DECL(rcvall_mcast);     \
     LOCAL_ATOM_DECL(rcvctrlbuf);       \
     LOCAL_ATOM_DECL(read);             \
     LOCAL_ATOM_DECL(read_pkg_max);     \
@@ -2386,6 +2450,7 @@ ERL_NIF_TERM esock_atom_socket_tag; // This has a "special" name ('$socket')
     LOCAL_ATOM_DECL(registry);         \
     LOCAL_ATOM_DECL(reject_route);     \
     LOCAL_ATOM_DECL(remote);           \
+    LOCAL_ATOM_DECL(remote_addr);      \
     LOCAL_ATOM_DECL(rstates);          \
     LOCAL_ATOM_DECL(selected);         \
     LOCAL_ATOM_DECL(sender_dry);       \
@@ -2404,6 +2469,7 @@ ERL_NIF_TERM esock_atom_socket_tag; // This has a "special" name ('$socket')
     LOCAL_ATOM_DECL(socket_level);     \
     LOCAL_ATOM_DECL(socket_option);    \
     LOCAL_ATOM_DECL(sourceaddr);       \
+    LOCAL_ATOM_DECL(tcp_info);         \
     LOCAL_ATOM_DECL(time_exceeded);    \
     LOCAL_ATOM_DECL(true);             \
     LOCAL_ATOM_DECL(txstatus);         \
@@ -2676,6 +2742,17 @@ static struct ESockOpt optLevelSocket[] =
         {0, NULL, NULL, &esock_atom_busy_poll},
 
         {
+#ifdef SO_BSP_STATE
+            SO_BSP_STATE,
+            NULL, esock_getopt_bsp_state,
+#else
+            0, NULL, NULL,
+#endif
+            &esock_atom_bsp_state},
+
+        {0, NULL, NULL, &esock_atom_busy_poll},
+
+        {
 #ifdef SO_DEBUG
             SO_DEBUG,
             esock_setopt_int_opt, esock_getopt_int_opt,
@@ -2705,13 +2782,22 @@ static struct ESockOpt optLevelSocket[] =
         {0, NULL, NULL, &esock_atom_error},
 
         {
-#ifdef SO_KEEPALIVE
-            SO_KEEPALIVE,
+#ifdef SO_EXCLUSIVEADDRUSE
+            SO_EXCLUSIVEADDRUSE,
             esock_setopt_bool_opt, esock_getopt_bool_opt,
 #else
             0, NULL, NULL,
 #endif
-            &esock_atom_keepalive},
+            &esock_atom_exclusiveaddruse},
+
+        {
+#ifdef SO_KEEPALIVE
+        SO_KEEPALIVE,
+        esock_setopt_bool_opt, esock_getopt_bool_opt,
+#else
+        0, NULL, NULL,
+#endif
+        &esock_atom_keepalive},
 
         {
 #ifdef SO_LINGER
@@ -2723,6 +2809,24 @@ static struct ESockOpt optLevelSocket[] =
             &esock_atom_linger},
 
         {0, NULL, NULL, &esock_atom_mark},
+
+        {
+#ifdef SO_MAXDG
+            SO_MAXDG,
+            NULL, esock_getopt_int_opt,
+#else
+            0, NULL, NULL,
+#endif
+            &esock_atom_maxdg},
+
+        {
+#ifdef SO_MAX_MSG_SIZE
+            SO_MAX_MSG_SIZE,
+            NULL, esock_getopt_int_opt,
+#else
+            0, NULL, NULL,
+#endif
+            &esock_atom_max_msg_size},
 
         {
 #ifdef SO_OOBINLINE
@@ -3541,9 +3645,33 @@ static struct ESockOpt optLevelTCP[] =
             &esock_atom_cork},
 
         {0, NULL, NULL, &esock_atom_info},
-        {0, NULL, NULL, &esock_atom_keepcnt},
-        {0, NULL, NULL, &esock_atom_keepidle},
-        {0, NULL, NULL, &esock_atom_keepintvl},
+
+        {
+#ifdef TCP_KEEPCNT
+            TCP_KEEPCNT,
+            esock_setopt_int_opt, esock_getopt_int_opt,
+#else
+            0, NULL, NULL,
+#endif
+            &esock_atom_keepcnt},
+
+        {
+#ifdef TCP_KEEPIDLE
+            TCP_KEEPIDLE,
+            esock_setopt_int_opt, esock_getopt_int_opt,
+#else
+            0, NULL, NULL,
+#endif
+            &esock_atom_keepidle},
+
+        {
+#ifdef TCP_KEEPINTVL
+            TCP_KEEPINTVL,
+            esock_setopt_int_opt, esock_getopt_int_opt,
+#else
+            0, NULL, NULL,
+#endif
+            &esock_atom_keepintvl},
 
         {
 #ifdef TCP_MAXSEG
@@ -3566,7 +3694,14 @@ static struct ESockOpt optLevelTCP[] =
             &esock_atom_nodelay},
 
         {0, NULL, NULL, &esock_atom_noopt},
-        {0, NULL, NULL, &esock_atom_nopush},
+        {
+#ifdef TCP_NOPUSH
+            TCP_NOPUSH,
+            esock_setopt_bool_opt, esock_getopt_bool_opt,
+#else
+            0, NULL, NULL,
+#endif
+        &esock_atom_nopush},
         {0, NULL, NULL, &esock_atom_syncnt},
         {0, NULL, NULL, &esock_atom_user_timeout}
 
@@ -4678,9 +4813,9 @@ ERL_NIF_TERM esock_supports_protocols(ErlNifEnv* env)
    */
 
   protocols =
-    MKC(env,
-	MKT2(env, MKL1(env, esock_atom_ip), MKI(env, protoIP)),
-	protocols);
+      MKC(env,
+          MKT2(env, MKL1(env, esock_atom_ip), MKI(env, protoIP)),
+          protocols);
 
 #ifdef HAVE_IPV6
   protocols =
@@ -4695,9 +4830,16 @@ ERL_NIF_TERM esock_supports_protocols(ErlNifEnv* env)
 	protocols);
 
   protocols =
-    MKC(env,
-	MKT2(env, MKL1(env, esock_atom_udp), MKI(env, IPPROTO_UDP)),
-	protocols);
+      MKC(env,
+          MKT2(env, MKL1(env, esock_atom_udp), MKI(env, IPPROTO_UDP)),
+          protocols);
+
+#ifdef IPPROTO_RM
+  protocols =
+      MKC(env,
+          MKT2(env, MKL1(env, esock_atom_rm), MKI(env, IPPROTO_RM)),
+          protocols);
+#endif
 
 #ifdef HAVE_SCTP
   protocols =
@@ -4706,9 +4848,13 @@ ERL_NIF_TERM esock_supports_protocols(ErlNifEnv* env)
 	protocols);
 #endif
 
+  protocols =
+      MKC(env,
+          MKT2(env, MKL1(env, esock_atom_igmp), MKI(env, IPPROTO_IGMP)),
+          protocols);
+
   return protocols;
 }
-
 
 
 static
@@ -4719,6 +4865,26 @@ ERL_NIF_TERM esock_supports_ioctl_requests(ErlNifEnv* env)
   requests = MKEL(env);
 
   /* --- GET REQUESTS --- */
+#if defined(SIOCGIFCONF)
+  requests = MKC(env, MKT2(env, atom_gifconf, MKUL(env, SIOCGIFCONF)), requests);
+#endif
+
+#if defined(FIONREAD)
+  requests = MKC(env, MKT2(env, atom_nread, MKUL(env, FIONREAD)), requests);
+#endif
+
+#if defined(FIONWRITE)
+  requests = MKC(env, MKT2(env, atom_nwrite, MKUL(env, FIONWRITE)), requests);
+#endif
+
+#if defined(FIONSPACE)
+  requests = MKC(env, MKT2(env, atom_nspace, MKUL(env, FIONSPACE)), requests);
+#endif
+
+#if defined(SIOCATMARK)
+  requests = MKC(env, MKT2(env, atom_atmark, MKUL(env, SIOCATMARK)), requests);
+#endif
+
 #if defined(SIOCGIFNAME)
   requests = MKC(env, MKT2(env, atom_gifname, MKUL(env, SIOCGIFNAME)), requests);
 #endif
@@ -4763,8 +4929,8 @@ ERL_NIF_TERM esock_supports_ioctl_requests(ErlNifEnv* env)
   requests = MKC(env, MKT2(env, atom_giftxqlen, MKUL(env, SIOCGIFTXQLEN)), requests);
 #endif
 
-#if defined(SIOCGIFCONF)
-  requests = MKC(env, MKT2(env, atom_gifconf, MKUL(env, SIOCGIFCONF)), requests);
+#if defined(SIO_TCP_INFO)
+  requests = MKC(env, MKT2(env, atom_tcp_info, MKUL(env, SIO_TCP_INFO)), requests);
 #endif
 
   /* --- SET REQUESTS --- */
@@ -4790,6 +4956,18 @@ ERL_NIF_TERM esock_supports_ioctl_requests(ErlNifEnv* env)
 
 #if defined(SIOCSIFTXQLEN)
   requests = MKC(env, MKT2(env, atom_siftxqlen, MKUL(env, SIOCSIFTXQLEN)), requests);
+#endif
+
+#if defined(SIO_RCVALL)
+  requests = MKC(env, MKT2(env, atom_rcvall, MKUL(env, SIO_RCVALL)), requests);
+#endif
+
+#if defined(SIO_RCVALL_IGMPMCAST)
+  requests = MKC(env, MKT2(env, atom_rcvall_igmpmcast, MKUL(env, SIO_RCVALL_IGMPMCAST)), requests);
+#endif
+
+#if defined(SIO_RCVALL_MCAST)
+  requests = MKC(env, MKT2(env, atom_rcvall_mcast, MKUL(env, SIO_RCVALL_MCAST)), requests);
 #endif
 
   return requests;
@@ -7027,15 +7205,15 @@ ERL_NIF_TERM esock_setopt(ErlNifEnv*       env,
     MLOCK(descP->writeMtx);
 
     SSDBG( descP,
-           ("SOCKET", "esock_setopt {%d} -> entry with"
-            "\r\n   level:       %d"
-            "\r\n   opt:        %d"
-            "\r\n   eVal:        %T"
+           ("SOCKET", "esock_setopt(%d) -> entry with"
+            "\r\n   level: %d"
+            "\r\n   opt:   %d"
+            "\r\n   eVal:  %T"
             "\r\n", descP->sock, level, opt, eVal) );
 
     if (! IS_OPEN(descP->writeState)) {
         SSDBG( descP,
-               ("SOCKET", "esock_setopt {%d} -> done closed\r\n",
+               ("SOCKET", "esock_setopt(%d) -> done closed\r\n",
                 descP->sock) );
 
         MUNLOCK(descP->writeMtx);
@@ -7050,7 +7228,7 @@ ERL_NIF_TERM esock_setopt(ErlNifEnv*       env,
 
         SSDBG( descP,
                ("SOCKET",
-                "esock_setopt {%d} -> unknown option\r\n",
+                "esock_setopt(%d) -> unknown option\r\n",
                 descP->sock) );
 
     } else if (optP->setopt == NULL) {
@@ -7059,7 +7237,7 @@ ERL_NIF_TERM esock_setopt(ErlNifEnv*       env,
 
         SSDBG( descP,
                ("SOCKET",
-                "esock_setopt {%d} -> opt not settable\r\n",
+                "esock_setopt(%d) -> opt not settable\r\n",
                 descP->sock) );
 
     } else {
@@ -7067,7 +7245,7 @@ ERL_NIF_TERM esock_setopt(ErlNifEnv*       env,
         result = (optP->setopt)(env, descP, level, opt, eVal);
 
         SSDBG( descP,
-               ("SOCKET", "esock_setopt {%d} -> done when"
+               ("SOCKET", "esock_setopt(%d) -> done when"
                 "\r\n   result: %T"
                 "\r\n", descP->sock, result) );
     }
@@ -7102,13 +7280,20 @@ ERL_NIF_TERM esock_setopt_linger(ErlNifEnv*       env,
     BOOLEAN_T onOff;
     struct linger val;
 
+    SSDBG( descP,
+           ("SOCKET", "esock_setopt_linger(%d) -> entry with"
+            "\r\n   level: %d"
+            "\r\n   opt:   %d"
+            "\r\n   eVal:  %T"
+            "\r\n", descP->sock, level, opt, eVal) );
+    
     sys_memzero(&val, sizeof(val));
 
     if ((! GET_MAP_VAL(env, eVal, atom_onoff, &eOnOff)) ||
         (! GET_MAP_VAL(env, eVal, esock_atom_linger, &eLinger))) {
 
         if (COMPARE(eVal, esock_atom_abort) == 0) {
-            val.l_onoff = 1;
+            val.l_onoff  = 1;
             val.l_linger = 0;
             return esock_setopt_level_opt(env, descP, level, opt,
                                           &val, sizeof(val));
@@ -7123,6 +7308,12 @@ ERL_NIF_TERM esock_setopt_linger(ErlNifEnv*       env,
     }
     val.l_onoff = onOff ? 1 : 0;
 
+    SSDBG( descP,
+           ("SOCKET", "esock_setopt_linger(%d) -> entry with"
+            "\r\n   val.l_onoff:  %d"
+            "\r\n   val.l_linger: %d"
+            "\r\n", descP->sock, val.l_onoff, val.l_linger) );
+    
     return esock_setopt_level_opt(env, descP, level, opt,
                                   &val, sizeof(val));
 }
@@ -8825,6 +9016,185 @@ ERL_NIF_TERM esock_getopt_so_bindtodevice(ErlNifEnv*       env,
 #endif
 
 
+#if defined(SO_BSP_STATE)
+/* We need to allocate *all* of the memory used by the CSADDR_INFO
+ * structure. *Including* the 'sockaddr' structures pointed to by
+ * LocalAddr and RemoteAddr (lpSockaddr in SOCKET_ADDRESS).
+ * The '2*' is just to "dead sure" that we have enough...
+ */
+static
+ERL_NIF_TERM esock_getopt_bsp_state(ErlNifEnv*       env,
+                                    ESockDescriptor* descP,
+                                    int              level,
+                                    int              opt)
+{
+    ERL_NIF_TERM result;
+    SOCKOPTLEN_T valSz = 2*(sizeof(CSADDR_INFO) + 2*sizeof(SOCKADDR));
+    CSADDR_INFO* valP  = MALLOC(valSz);
+    int          res;
+
+    SSDBG( descP,
+           ("SOCKET", "esock_getopt_bsp_state(%d) -> entry\r\n", descP->sock) );
+
+    sys_memzero((void *) valP, valSz);
+
+#ifdef __WIN32__
+    res = sock_getopt(descP->sock, level, opt, (char*) valP, &valSz);
+#else
+    res = sock_getopt(descP->sock, level, opt, valP, &valSz);
+#endif
+
+    if (res != 0) {
+        int          save_errno = sock_errno();
+        ERL_NIF_TERM reason     = ENO2T(env, save_errno);
+
+        SSDBG( descP,
+               ("SOCKET", "esock_getopt_bsp_state(%d) -> error: "
+                "\r\n   %T"
+                "\r\n", descP->sock, reason) );
+
+        result = esock_make_error(env, reason);
+
+    } else if (valSz > 0) {
+        ERL_NIF_TERM
+            la     = esock_encode_bsp_state_socket_address(env, &valP->LocalAddr),
+            ra     = esock_encode_bsp_state_socket_address(env, &valP->RemoteAddr),
+            type   = esock_encode_bsp_state_type(env,  valP->iSocketType),
+            proto  = esock_encode_bsp_state_protocol(env, valP->iProtocol),
+            keys[] = {atom_local_addr, atom_remote_addr, esock_atom_type, esock_atom_protocol},
+            vals[] = {la, ra, type, proto},
+            bspState;
+        size_t numKeys = NUM(keys);
+
+        SSDBG( descP,
+               ("SOCKET", "esock_getopt_bsp_state(%d) -> values encoded:"
+                "\r\n   la:    %T"
+                "\r\n   ra:    %T"
+                "\r\n   type:  %T"
+                "\r\n   proto: %T"
+                "\r\n", descP->sock,
+                la, ra, type, proto) );
+    
+        ESOCK_ASSERT( numKeys == NUM(vals) );
+        ESOCK_ASSERT( MKMA(env, keys, vals, numKeys, &bspState) );
+
+        SSDBG( descP,
+               ("SOCKET", "esock_getopt_bsp_state(%d) -> "
+                "\r\n   BSP State: %T"
+                "\r\n", descP->sock, bspState) );
+    
+        result = esock_make_ok2(env, bspState);
+    } else {
+        result = esock_make_ok2(env, esock_atom_undefined);
+    }
+
+    FREE( valP );
+
+    SSDBG( descP,
+           ("SOCKET", "esock_getopt_bsp_state(%d) -> done when"
+            "\r\n   result: %T"
+            "\r\n", descP->sock, result) );
+
+    return result;
+}
+
+
+static
+ERL_NIF_TERM esock_encode_bsp_state_socket_address(ErlNifEnv*      env,
+                                                   SOCKET_ADDRESS* addr)
+{
+    ERL_NIF_TERM eaddr;
+
+    if (addr == NULL)
+        return esock_atom_undefined;
+
+    if ((addr->lpSockaddr == NULL) ||
+        (addr->iSockaddrLength == 0))
+        return esock_atom_undefined;
+
+    esock_encode_sockaddr(env,
+                          (ESockAddress*) addr->lpSockaddr,
+                          addr->iSockaddrLength,
+                          &eaddr);
+
+    return eaddr;
+}
+
+
+static
+ERL_NIF_TERM esock_encode_bsp_state_type(ErlNifEnv* env, int type)
+{
+    ERL_NIF_TERM etype;
+
+    switch (type) {
+    case SOCK_STREAM:
+        etype = esock_atom_stream;
+        break;
+
+    case SOCK_DGRAM:
+        etype = esock_atom_dgram;
+        break;
+
+    case SOCK_RDM:
+        etype = esock_atom_rdm;
+        break;
+
+    case SOCK_SEQPACKET:
+        etype = esock_atom_seqpacket;
+        break;
+
+    default:
+        etype = MKI(env, type);
+        break;
+    }
+
+    return etype;
+}
+
+
+static
+ERL_NIF_TERM esock_encode_bsp_state_protocol(ErlNifEnv* env, int proto)
+{
+    ERL_NIF_TERM eproto;
+
+    switch (proto) {
+    case IPPROTO_TCP:
+        eproto = esock_atom_tcp;
+        break;
+
+    case IPPROTO_UDP:
+        eproto = esock_atom_udp;
+        break;
+
+        /*
+         * In Wista and later the IPPROTO_PGM constant is defined in the
+         * Ws2def.h header file to the same value as the IPPROTO_RM constant
+         * defined in the Wsrm.h header file.
+         * => So we use IPPROTO_PGM also but translate to rm...
+         *
+         */
+#if defined(IPPROTO_RM) || defined(IPPROTO_PGM)
+#if defined(IPPROTO_RM)
+    case IPPROTO_RM:
+#else if defined(IPPROTO_PGM)
+    case IPPROTO_PGM:
+#endif
+        eproto = esock_atom_rm;
+        break;
+#endif
+
+    default:
+        eproto = MKI(env, proto);
+        break;
+    }
+
+    return eproto;
+}
+
+#endif
+
+
+
 #if defined(SO_DOMAIN)
 static
 ERL_NIF_TERM esock_getopt_sock_domain(ErlNifEnv*       env,
@@ -8879,9 +9249,24 @@ ERL_NIF_TERM esock_getopt_linger(ErlNifEnv*       env,
             linger;
         size_t numKeys = NUM(keys);
 
+        SSDBG( descP,
+               ("SOCKET", "esock_getopt_linger(%d) -> "
+                "\r\n   val.l_onoff:  %d"
+                "\r\n   lOnOff:       %T"
+                "\r\n   val.l_linger: %d"
+                "\r\n   lSecs:        %T"
+                "\r\n", descP->sock,
+                val.l_onoff, lOnOff,
+                val.l_linger, lSecs) );
+    
         ESOCK_ASSERT( numKeys == NUM(vals) );
         ESOCK_ASSERT( MKMA(env, keys, vals, numKeys, &linger) );
 
+        SSDBG( descP,
+               ("SOCKET", "esock_getopt_linger(%d) -> "
+                "\r\n   linger: %T"
+                "\r\n", descP->sock, linger) );
+    
         result = esock_make_ok2(env, linger);
     }
 
@@ -9800,8 +10185,8 @@ ERL_NIF_TERM esock_peername(ErlNifEnv*       env,
     return esock_make_error_closed(env);
 
   SSDBG( descP,
-         ("SOCKET", "esock_peername {%d} -> open - try get peername\r\n",
-          descP->sock) );
+         ("SOCKET", "esock_peername {%d} -> open - try get peername (%d)\r\n",
+          descP->sock, sz) );
 
   sys_memzero((char*) saP, sz);
   if (sock_peer(descP->sock, (struct sockaddr*) saP, &sz) < 0) {
@@ -9811,8 +10196,8 @@ ERL_NIF_TERM esock_peername(ErlNifEnv*       env,
 
       SSDBG( descP,
              ("SOCKET", "esock_peername {%d} -> "
-              "got peername - try decode\r\n",
-              descP->sock) );
+              "got peername (%d) - try decode\r\n",
+              descP->sock, sz) );
 
       esock_encode_sockaddr(env, saP, (SOCKLEN_T) sz, &esa);
 
@@ -12769,6 +13154,39 @@ BOOLEAN_T esock_monitor_eq(const ESockMonitor* monP,
 
 
 
+/*
+ * Misc ioctl utility functions.
+ */
+extern
+ERL_NIF_TERM esock_encode_ioctl_ivalue(ErlNifEnv*       env,
+                                       ESockDescriptor* descP,
+                                       int              ivalue)
+{
+    ERL_NIF_TERM eivalue = MKI(env, ivalue);
+
+    SSDBG( descP, ("SOCKET", "esock_encode_ioctl_ivalue -> done with"
+                   "\r\n    iValue: %T (%d)"
+                   "\r\n", eivalue, ivalue) );
+
+    return esock_make_ok2(env, eivalue);
+}
+
+
+extern
+ERL_NIF_TERM esock_encode_ioctl_bvalue(ErlNifEnv*       env,
+                                       ESockDescriptor* descP,
+                                       int              bvalue)
+{
+    ERL_NIF_TERM ebvalue = ((bvalue) ? esock_atom_true : esock_atom_false);
+
+    SSDBG( descP, ("SOCKET", "esock_encode_ioctl_bvalue -> done with"
+                   "\r\n    bValue: %T (%d)"
+                   "\r\n", ebvalue, bvalue) );
+
+    return esock_make_ok2(env, ebvalue);
+}
+
+
 /* ----------------------------------------------------------------------
  *  C a l l b a c k   F u n c t i o n s
  * ----------------------------------------------------------------------
@@ -13295,8 +13713,8 @@ int on_load(ErlNifEnv* env, void** priv_data, ERL_NIF_TERM load_info)
     io_backend.getopt_native  = esock_getopt_native;
     io_backend.getopt_otp     = esock_getopt_otp;
 
-    io_backend.ioctl_2        = NULL;
-    io_backend.ioctl_3        = NULL;
+    io_backend.ioctl_2        = esaio_ioctl2;
+    io_backend.ioctl_3        = esaio_ioctl3;
     io_backend.ioctl_4        = NULL;
 
     io_backend.dtor           = esaio_dtor;

@@ -879,7 +879,7 @@ send(#sslsocket{pid = {ListenSocket, #config{transport_info = Info}}}, Data) ->
 %%--------------------------------------------------------------------
 -spec recv(SslSocket, Length) -> {ok, Data} | {error, reason()} when
       SslSocket :: sslsocket(),
-      Length :: integer(),
+      Length :: non_neg_integer(),
       Data :: binary() | list() | HttpPacket,
       HttpPacket :: any().
 
@@ -888,13 +888,15 @@ recv(Socket, Length) ->
 
 -spec recv(SslSocket, Length, Timeout) -> {ok, Data} | {error, reason()} when
       SslSocket :: sslsocket(),
-      Length :: integer(),
+      Length :: non_neg_integer(),
       Data :: binary() | list() | HttpPacket,
       Timeout :: timeout(),
       HttpPacket :: any().
 
-recv(#sslsocket{pid = [Pid|_]}, Length, Timeout) when is_pid(Pid),
-						  (is_integer(Timeout) andalso Timeout >= 0) or (Timeout == infinity)->
+recv(#sslsocket{pid = [Pid|_]}, Length, Timeout)
+  when is_pid(Pid) andalso
+       (is_integer(Length) andalso Length >= 0) andalso
+       ((is_integer(Timeout) andalso Timeout >= 0) orelse Timeout == infinity) ->
     ssl_gen_statem:recv(Pid, Length, Timeout);
 recv(#sslsocket{pid = {dtls,_}}, _, _) ->
     {error,enotconn};
@@ -999,7 +1001,7 @@ peercert(#sslsocket{pid = {_Listen, #config{}}}) ->
 -spec negotiated_protocol(SslSocket) -> {ok, Protocol} | {error, Reason} when
       SslSocket :: sslsocket(),
       Protocol :: binary(),
-      Reason :: protocol_not_negotiated.
+      Reason :: protocol_not_negotiated | closed.
 %%
 %% Description: Returns the protocol that has been negotiated. If no
 %% protocol has been negotiated will return {error, protocol_not_negotiated}
@@ -1322,8 +1324,21 @@ getstat(#sslsocket{pid = [Pid|_], fd = {Transport, Socket, _}},
 %%
 %% Description: Same as gen_tcp:shutdown/2
 %%--------------------------------------------------------------------
-shutdown(#sslsocket{pid = {dtls, #config{}}},_) ->
-    {error, enotconn};
+shutdown(#sslsocket{pid = {dtls, #config{transport_info = Info}}}, _) ->
+    Transport = element(1, Info),
+    %% enotconn is what gen_tcp:shutdown on a listen socket will result with.
+    %% shutdown really is handling TCP functionality not present
+    %% with gen_udp or gen_sctp, but if a callback wrapper is supplied let
+    %% the error be the same as for gen_tcp as a wrapper could have
+    %% supplied it own logic and this is backwards compatible.
+    case Transport of
+        gen_udp ->
+            {error, notsup};
+        gen_sctp ->
+            {error, notsup};
+        _  ->
+            {error, enotconn}
+    end;
 shutdown(#sslsocket{pid = {Listen, #config{transport_info = Info}}}, How) ->
     Transport = element(1, Info),
     Transport:shutdown(Listen, How);    
@@ -2752,16 +2767,34 @@ do_format_error(closed) ->
     "TLS connection is closed";
 do_format_error({tls_alert, {_, Description}}) ->
     Description;
-do_format_error({options,{FileType, File, Reason}}) when FileType == cacertfile;
-						      FileType == certfile;
-                                                         FileType == keyfile;
-						      FileType == dhfile ->
+do_format_error({options,{FileType, File, Reason}})
+  when FileType == cacertfile;
+       FileType == certfile;
+       FileType == keyfile;
+       FileType == dhfile ->
     Error = file_error_format(Reason),
     file_desc(FileType) ++ File ++ ": " ++ Error;
 do_format_error ({options, {socket_options, Option, Error}}) ->
     lists:flatten(io_lib:format("Invalid transport socket option ~p: ~s", [Option, do_format_error(Error)]));
 do_format_error({options, {socket_options, Option}}) ->
     lists:flatten(io_lib:format("Invalid socket option: ~p", [Option]));
+do_format_error({options, incompatible, Opts}) ->
+    lists:flatten(io_lib:format("Options (or their values) can not be combined: ~p", [Opts]));
+do_format_error({option, Reason, Opts}) ->
+    lists:flatten(io_lib:format("Invalid option ~w ~w", [Opts, Reason]));
+do_format_error({options, Reason, Opts}) ->
+    lists:flatten(io_lib:format("Invalid option ~w ~w", [Opts, Reason]));
+do_format_error({options, {missing_version=R, Opts}}) ->
+    lists:flatten(io_lib:format("Invalid option ~w ~w", [Opts, R]));
+do_format_error({options, {option_not_a_key_value_tuple=R, Opts}}) ->
+    lists:flatten(io_lib:format("Invalid option ~w ~w", [Opts, R]));
+do_format_error({options, {no_supported_algorithms=R, Opts}}) ->
+    lists:flatten(io_lib:format("Invalid option ~w ~w", [Opts, R]));
+do_format_error({options, {no_supported_signature_schemes=R, Opts}}) ->
+    lists:flatten(io_lib:format("Invalid option ~w ~w", [Opts, R]));
+do_format_error({options, {insufficient_crypto_support=R, Opts}}) ->
+    lists:flatten(io_lib:format("Invalid option ~w ~w", [Opts, R]));
+
 do_format_error({options, Options}) ->
     lists:flatten(io_lib:format("Invalid TLS option: ~p", [Options]));
 

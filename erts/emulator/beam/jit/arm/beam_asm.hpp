@@ -81,7 +81,7 @@ protected:
 
     const arm::Gp E = a64::x20;
     const arm::Gp c_p = a64::x21;
-    const arm::Gp FCALLS = a64::x22;
+    const arm::Gp FCALLS = a64::w22;
     const arm::Gp HTOP = a64::x23;
 
     /* Local copy of the active code index.
@@ -686,13 +686,23 @@ protected:
         a.cmp(SUPER_TMP, imm(TAG_PRIMARY_IMMED1));
     }
 
+    arm::Gp follow_size(const arm::Gp &reg, const arm::Gp &size) {
+        ASSERT(reg.isGpX());
+
+        if (size.isGpW()) {
+            return reg.w();
+        }
+
+        return reg;
+    }
+
     template<typename T>
     void mov_imm(arm::Gp to, T value) {
         static_assert(std::is_integral<T>::value || std::is_pointer<T>::value);
         if (value) {
             a.mov(to, imm(value));
         } else {
-            a.mov(to, ZERO);
+            a.mov(to, follow_size(ZERO, to));
         }
     }
 
@@ -716,8 +726,10 @@ protected:
                 a.sub(to, src, imm(val & 0xFFF000));
             }
         } else {
-            mov_imm(SUPER_TMP, val);
-            a.sub(to, src, SUPER_TMP);
+            arm::Gp super_tmp = follow_size(SUPER_TMP, to);
+
+            mov_imm(super_tmp, val);
+            a.sub(to, src, super_tmp);
         }
     }
 
@@ -736,8 +748,10 @@ protected:
                 a.add(to, src, imm(val & 0xFFF000));
             }
         } else {
-            mov_imm(SUPER_TMP, val);
-            a.add(to, src, SUPER_TMP);
+            arm::Gp super_tmp = follow_size(SUPER_TMP, to);
+
+            mov_imm(super_tmp, val);
+            a.add(to, src, super_tmp);
         }
     }
 
@@ -747,8 +761,10 @@ protected:
         } else if (Support::isUInt12(-val)) {
             a.adds(to, src, imm(-val));
         } else {
-            mov_imm(SUPER_TMP, val);
-            a.subs(to, src, SUPER_TMP);
+            arm::Gp super_tmp = follow_size(SUPER_TMP, to);
+
+            mov_imm(super_tmp, val);
+            a.subs(to, src, super_tmp);
         }
     }
 
@@ -757,13 +773,11 @@ protected:
             a.cmp(src, imm(val));
         } else if (Support::isUInt12(-val)) {
             a.cmn(src, imm(-val));
-        } else if (src.isGpW()) {
-            mov_imm(SUPER_TMP.w(), val);
-            a.cmp(src, SUPER_TMP.w());
         } else {
-            ERTS_ASSERT(src.isGpX());
-            mov_imm(SUPER_TMP, val);
-            a.cmp(src, SUPER_TMP);
+            arm::Gp super_tmp = follow_size(SUPER_TMP, src);
+
+            mov_imm(super_tmp, val);
+            a.cmp(src, super_tmp);
         }
     }
 
@@ -1077,8 +1091,7 @@ protected:
     arm::Mem emit_fixed_apply(const ArgWord &arity, bool includeI);
 
     arm::Gp emit_call_fun(bool skip_box_test = false,
-                          bool skip_fun_test = false,
-                          bool skip_arity_test = false);
+                          bool skip_header_test = false);
 
     void emit_is_boxed(Label Fail, arm::Gp Src) {
         BeamAssembler::emit_is_boxed(Fail, Src);
@@ -1114,6 +1127,15 @@ protected:
                              const ArgSource &RHS,
                              const a64::Gp rhs_reg,
                              const Label next);
+
+    void emit_div_rem_literal(Sint divisor,
+                              const ArgSource &Dividend,
+                              arm::Gp dividend,
+                              arm::Gp quotient,
+                              arm::Gp remainder,
+                              const Label &generic,
+                              bool need_div,
+                              bool need_rem);
 
     void emit_div_rem(const ArgLabel &Fail,
                       const ArgSource &LHS,

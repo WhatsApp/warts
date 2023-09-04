@@ -744,8 +744,8 @@ Uint beam_jit_get_map_elements(Eterm map,
         ASSERT(is_hashmap(map));
 
         while (n--) {
+            erts_ihash_t hx;
             const Eterm *v;
-            Uint32 hx;
 
             hx = fs[2];
             ASSERT(hx == hashmap_make_hash(fs[0]));
@@ -1087,6 +1087,24 @@ Sint beam_jit_bs_bit_size(Eterm term) {
     return (Sint)-1;
 }
 
+Eterm beam_jit_int128_to_big(Process *p, Uint sign, Uint low, Uint high) {
+    Eterm *hp;
+    Uint arity;
+
+    arity = high ? 2 : 1;
+    hp = HeapFragOnlyAlloc(p, BIG_NEED_SIZE(arity));
+    if (sign) {
+        hp[0] = make_neg_bignum_header(arity);
+    } else {
+        hp[0] = make_pos_bignum_header(arity);
+    }
+    BIG_DIGIT(hp, 0) = low;
+    if (arity == 2) {
+        BIG_DIGIT(hp, 1) = high;
+    }
+    return make_big(hp);
+}
+
 ErtsMessage *beam_jit_decode_dist(Process *c_p, ErtsMessage *msgp) {
     if (!erts_proc_sig_decode_dist(c_p, ERTS_PROC_LOCK_MAIN, msgp, 0)) {
         /*
@@ -1106,11 +1124,11 @@ ErtsMessage *beam_jit_decode_dist(Process *c_p, ErtsMessage *msgp) {
 }
 
 /* Remove a (matched) message from the message queue. */
-Sint beam_jit_remove_message(Process *c_p,
-                             Sint FCALLS,
-                             Eterm *HTOP,
-                             Eterm *E,
-                             Uint32 active_code_ix) {
+Sint32 beam_jit_remove_message(Process *c_p,
+                               Sint32 FCALLS,
+                               Eterm *HTOP,
+                               Eterm *E,
+                               Uint32 active_code_ix) {
     ErtsMessage *msgp;
 
     ERTS_CHK_MBUF_SZ(c_p);

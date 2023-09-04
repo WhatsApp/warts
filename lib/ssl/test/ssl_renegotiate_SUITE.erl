@@ -24,6 +24,7 @@
 
 -behaviour(ct_suite).
 
+-include("ssl_test_lib.hrl").
 -include_lib("common_test/include/ct.hrl").
 -include_lib("public_key/include/public_key.hrl").
 -include("ssl_record.hrl").
@@ -61,7 +62,9 @@
          renegotiate_dos_mitigate_passive/0,
          renegotiate_dos_mitigate_passive/1,
          renegotiate_dos_mitigate_absolute/0,
-         renegotiate_dos_mitigate_absolute/1
+         renegotiate_dos_mitigate_absolute/1,
+         active_error_disallowed_client_renegotiate/0,
+         active_error_disallowed_client_renegotiate/1
         ]).
 
 %% Apply export
@@ -105,7 +108,8 @@ renegotiate_tests() ->
      server_no_wrap_sequence_number,
      renegotiate_dos_mitigate_active,
      renegotiate_dos_mitigate_passive,
-     renegotiate_dos_mitigate_absolute].
+     renegotiate_dos_mitigate_absolute,
+     active_error_disallowed_client_renegotiate].
 
 init_per_suite(Config) ->
     catch crypto:stop(),
@@ -467,12 +471,37 @@ renegotiate_dos_mitigate_absolute(Config) when is_list(Config) ->
     ssl_test_lib:close(Client).
 
 %%--------------------------------------------------------------------
+active_error_disallowed_client_renegotiate() ->
+    [{doc,"Test that an active client socket gets an error when server denies client renegotiation."}].
+active_error_disallowed_client_renegotiate(Config) when is_list(Config) ->
+    ServerOpts = ssl_test_lib:ssl_options(server_rsa_verify_opts, Config),
+    ClientOpts = ssl_test_lib:ssl_options(client_rsa_verify_opts, Config),
+
+    {ClientNode, ServerNode, Hostname} = ssl_test_lib:run_where(Config),
+
+    Server =
+	ssl_test_lib:start_server([{node, ServerNode}, {port, 0},
+				   {from, self()},
+				   {mfa, {ssl_test_lib, no_result, []}},
+				   {options, [{client_renegotiation, false} | ServerOpts]}]),
+    Port = ssl_test_lib:inet_port(Server),
+
+    {ok, Client} = ssl:connect(Hostname, Port, [{renegotiate_at, 1}, {active, true} | ClientOpts]),
+
+    {error, closed} = ssl:send(Client, crypto:strong_rand_bytes(20)),
+
+    receive
+        {ssl_error, Client, _} ->
+            ok
+    end.
+
+%%--------------------------------------------------------------------
 %% Internal functions ------------------------------------------------
 %%--------------------------------------------------------------------
 renegotiate(Socket, Data) ->
-    ct:log("Renegotiating ~n", []),
+    ?CT_LOG("Renegotiating ~n", []),
     Result = ssl:renegotiate(Socket),
-    ct:log("Result ~p~n", [Result]),
+    ?CT_LOG("Result ~p~n", [Result]),
     ssl:send(Socket, Data),
     case Result of
 	ok ->
@@ -492,7 +521,7 @@ renegotiate_immediately(Socket) ->
     {error, renegotiation_rejected} = ssl:renegotiate(Socket),
     ct:sleep(?RENEGOTIATION_DISABLE_TIME + ?SLEEP),
     ok = ssl:renegotiate(Socket),
-    ct:log("Renegotiated again"),
+    ?CT_LOG("Renegotiated again"),
     ssl:send(Socket, "Hello world"),
     ok.
 
@@ -502,7 +531,7 @@ renegotiate_rejected(Socket) ->
     {error, renegotiation_rejected} = ssl:renegotiate(Socket),
     ct:sleep(?RENEGOTIATION_DISABLE_TIME +1),
     {error, renegotiation_rejected} = ssl:renegotiate(Socket),
-    ct:log("Failed to renegotiate again"),
+    ?CT_LOG("Failed to renegotiate again"),
     ssl:send(Socket, "Hello world"),
     ok.
 

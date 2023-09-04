@@ -824,13 +824,16 @@ handle_call({shutdown, read_write = How}, From, StateName,
     try send_alert(?ALERT_REC(?WARNING, ?CLOSE_NOTIFY),
                    StateName, State) of
         _ ->
-            case Transport:shutdown(Socket, How) of
+            try Transport:shutdown(Socket, How) of
                 ok ->
                     {next_state, StateName, State#state{connection_env =
                                                             CEnv#connection_env{socket_terminated = true}},
                      [{reply, From, ok}]};
                 Error ->
                     {stop_and_reply, {shutdown, normal}, {reply, From, Error},
+                     State#state{connection_env = CEnv#connection_env{socket_terminated = true}}}
+            catch error:{undef, _} ->
+                    {stop_and_reply, {shutdown, normal}, {reply, From, {error, notsup}},
                      State#state{connection_env = CEnv#connection_env{socket_terminated = true}}}
             end
     catch
@@ -1071,10 +1074,11 @@ handle_normal_shutdown(Alert, StateName, #state{static_env = #static_env{role = 
                                                                          protocol_cb = Connection,
                                                                          trackers = Trackers},
                                                 connection_env  = #connection_env{user_application = {_Mon, Pid}},
+                                                handshake_env = #handshake_env{renegotiation = Type},
                                                 socket_options = Opts,
 						start_or_recv_from = RecvFrom} = State) ->
     Pids = Connection:pids(State),
-    alert_user(Pids, Transport, Trackers, Socket, StateName, Opts, Pid, RecvFrom, Alert, Role, StateName, Connection).
+    alert_user(Pids, Transport, Trackers, Socket, Type, Opts, Pid, RecvFrom, Alert, Role, StateName, Connection).
 
 handle_alert(#alert{level = ?FATAL} = Alert, StateName, State) ->
     handle_fatal_alert(Alert, StateName, State);
@@ -1876,9 +1880,11 @@ send_user(Pid, Msg) ->
     Pid ! Msg,
     ok.
 
-alert_user(Pids, Transport, Trackers, Socket, connection, Opts, Pid, From, Alert, Role, StateName, Connection) ->
+alert_user(Pids, Transport, Trackers, Socket, _, Opts, Pid, From, Alert, Role, connection = StateName, Connection) ->
     alert_user(Pids, Transport, Trackers, Socket, Opts#socket_options.active, Pid, From, Alert, Role, StateName, Connection);
-alert_user(Pids, Transport, Trackers, Socket,_, _, _, From, Alert, Role, StateName, Connection) ->
+alert_user(Pids, Transport, Trackers, Socket, {true, internal}, Opts, Pid, From, Alert, Role, StateName, Connection) ->
+    alert_user(Pids, Transport, Trackers, Socket, Opts#socket_options.active, Pid, From, Alert, Role, StateName, Connection);
+alert_user(Pids, Transport, Trackers, Socket, _, _, _, From, Alert, Role, StateName, Connection) ->
     alert_user(Pids, Transport, Trackers, Socket, From, Alert, Role, StateName, Connection).
 
 alert_user(Pids, Transport, Trackers, Socket, From, Alert, Role, StateName, Connection) ->
@@ -2047,6 +2053,8 @@ get_socket_opts(Connection, Transport, Socket, [Tag | Tags], SockOpts, Acc) ->
     case Connection:getopts(Transport, Socket, [Tag]) of
         {ok, [Opt]} ->
             get_socket_opts(Connection, Transport, Socket, Tags, SockOpts, [Opt | Acc]);
+        {ok, []} ->
+            get_socket_opts(Connection, Transport, Socket, Tags, SockOpts, Acc);
         {error, Reason} ->
             {error, {options, {socket_options, Tag, Reason}}}
     end;
@@ -2176,18 +2184,6 @@ ssl_options_list([{Key, Value}|T], Acc) ->
 maybe_add_keylog(Info) ->
     maybe_add_keylog(lists:keyfind(protocol, 1, Info), Info).
 
-maybe_add_keylog({_, 'tlsv1.2'}, Info) ->
-    try
-        {client_random, ClientRandomBin} = lists:keyfind(client_random, 1, Info),
-        {master_secret, MasterSecretBin} = lists:keyfind(master_secret, 1, Info),
-        ClientRandom = binary:decode_unsigned(ClientRandomBin),
-        MasterSecret = binary:decode_unsigned(MasterSecretBin),
-        Keylog = [io_lib:format("CLIENT_RANDOM ~64.16.0B ~96.16.0B", [ClientRandom, MasterSecret])],
-        Info ++ [{keylog,Keylog}]
-    catch
-        _Cxx:_Exx ->
-            Info
-    end;
 maybe_add_keylog({_, 'tlsv1.3'}, Info) ->
     try
         {client_random, ClientRandomBin} = lists:keyfind(client_random, 1, Info),
@@ -2230,6 +2226,18 @@ maybe_add_keylog({_, 'tlsv1.3'}, Info) ->
                      _ ->
                          Keylog0
                  end,
+        Info ++ [{keylog,Keylog}]
+    catch
+        _Cxx:_Exx ->
+            Info
+    end;
+maybe_add_keylog({_, _}, Info) ->
+    try
+        {client_random, ClientRandomBin} = lists:keyfind(client_random, 1, Info),
+        {master_secret, MasterSecretBin} = lists:keyfind(master_secret, 1, Info),
+        ClientRandom = binary:decode_unsigned(ClientRandomBin),
+        MasterSecret = binary:decode_unsigned(MasterSecretBin),
+        Keylog = [io_lib:format("CLIENT_RANDOM ~64.16.0B ~96.16.0B", [ClientRandom, MasterSecret])],
         Info ++ [{keylog,Keylog}]
     catch
         _Cxx:_Exx ->

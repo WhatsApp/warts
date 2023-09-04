@@ -121,6 +121,8 @@
 
 #define ERRNO_BLOCK                  WSAEWOULDBLOCK
 
+#define ESAIO_RECVFROM_MIN_BUFSZ     0x8000
+
 
 /* ======================================================================== *
  *                               Socket wrappers                            *
@@ -135,6 +137,10 @@
 #define sock_connect_O(s, a, al, sent, o)                               \
     ctrl.connect((s), (struct sockaddr*) (a), (al), NULL, 0, (sent), (o))
 #define sock_errno()                    WSAGetLastError()
+#define sock_ioctl1(s, cc, b)                    \
+    ioctlsocket((s), (cc), (b))
+#define sock_ioctl2(s, cc, ib, ibs, ob, obs, br) \
+    WSAIoctl((s), (cc), (ib), (ibs), (ob), (obs), (br), NULL, NULL)
 // #define sock_listen(s, b)               listen((s), (b))
 // #define sock_name(s, addr, len)        getsockname((s), (addr), (len))
 #define sock_open(domain, type, proto)  socket((domain), (type), (proto))
@@ -640,6 +646,48 @@ static ERL_NIF_TERM recvmsg_check_fail(ErlNifEnv*       env,
                                        ESAIOOperation*  opP,
                                        int              saveErrno,
                                        ERL_NIF_TERM     sockRef);
+
+#if defined(FIONREAD)
+static ERL_NIF_TERM esaio_ioctl_fionread(ErlNifEnv*       env,
+                                         ESockDescriptor* descP);
+#endif
+#if defined(SIOCATMARK)
+static ERL_NIF_TERM esaio_ioctl_siocatmark(ErlNifEnv*       env,
+                                           ESockDescriptor* descP);
+#endif
+
+#if defined(SIO_TCP_INFO)
+static ERL_NIF_TERM esaio_ioctl_tcp_info(ErlNifEnv*       env,
+                                         ESockDescriptor* descP,
+                                         ERL_NIF_TERM     eversion);
+static ERL_NIF_TERM encode_tcp_info_v0(ErlNifEnv*   env,
+                                       TCP_INFO_v0* infoP);
+#if defined(HAVE_TCP_INFO_V1)
+static ERL_NIF_TERM encode_tcp_info_v1(ErlNifEnv*   env,
+                                       TCP_INFO_v1* infoP);
+#endif
+static ERL_NIF_TERM encode_tcp_state(ErlNifEnv* env,
+                                     TCPSTATE   state);
+#endif
+
+#if defined(SIO_RCVALL)
+static ERL_NIF_TERM esaio_ioctl_rcvall(ErlNifEnv*       env,
+                                       ESockDescriptor* descP,
+                                       ERL_NIF_TERM     evalue);
+#endif
+
+#if defined(SIO_RCVALL_IGMPMCAST)
+static ERL_NIF_TERM esaio_ioctl_rcvall_igmpmcast(ErlNifEnv*       env,
+                                                 ESockDescriptor* descP,
+                                                 ERL_NIF_TERM     evalue);
+#endif
+
+#if defined(SIO_RCVALL_MCAST)
+static ERL_NIF_TERM esaio_ioctl_rcvall_mcast(ErlNifEnv*       env,
+                                             ESockDescriptor* descP,
+                                             ERL_NIF_TERM     evalue);
+#endif
+
 
 static void* esaio_completion_main(void* threadDataP);
 static BOOLEAN_T esaio_completion_terminate(ESAIOThreadData* dataP,
@@ -2069,7 +2117,7 @@ ERL_NIF_TERM esaio_accept(ErlNifEnv*       env,
     opP->caller               = caller;
 
     /* Create the accepting socket
-     * domain   - should be AF_INET | AF_INET6 (sould we make sure?)
+     * domain   - should be AF_INET | AF_INET6 | AF_LOCAL (sould we make sure?)
      * type     - should be SOCK_STREAM | SOCK_SEQPACKET (should we make sure?)
      * protocol - should be IPPROTO_TCP | IPPROTO_SCTP (should we make sure?)
      * See check above!
@@ -2115,6 +2163,9 @@ ERL_NIF_TERM esaio_accept(ErlNifEnv*       env,
         break;
     case AF_INET6:
         addrSz = sizeof(struct sockaddr_in6) + 16;
+        break;
+    case AF_LOCAL:
+        addrSz = sizeof(struct sockaddr_un) + 16;
         break;
     default:
         return esock_make_error_invalid(env, esock_atom_domain);
@@ -2228,7 +2279,7 @@ ERL_NIF_TERM accept_check_pending(ErlNifEnv*       env,
                   esock_atom_acc_waits, &descP->accWaits, 1);
 
     if (descP->acceptorsQ.first == NULL)
-        descP->readState |= ESOCK_STATE_ACCEPTING;
+        descP->readState |= (ESOCK_STATE_ACCEPTING | ESOCK_STATE_SELECTED);
 
     /* Will be picked up by the (worker) threads when the event comes */
     esock_acceptor_push(env, descP, caller, accRef, opP);
@@ -3852,20 +3903,23 @@ ERL_NIF_TERM recv_check_ok(ErlNifEnv*       env,
 
             if (read == opP->data.recv.buf.size) {
 
-                /* This transfers "ownership" of the *allocated* binary to an
-                 * erlang term (no need for an explicit free).
-                 */
-                data = MKBIN(env, &opP->data.recv.buf);
-
+                SSDBG( descP,
+                       ("WIN-ESAIO",
+                        "recv_check_ok(%T, %d) -> complete success"
+                        "\r\n", sockRef, descP->sock) );
             } else {
 
-                /* This transfers "ownership" of the *allocated* binary to an
-                 * erlang term (no need for an explicit free).
-                 */
-                data = MKBIN(env, &opP->data.recv.buf);
-                data = MKSBIN(env, data, 0, read);
+                SSDBG( descP,
+                       ("WIN-ESAIO",
+                        "recv_check_ok(%T, %d) -> partial (%d) success"
+                        "\r\n", sockRef, descP->sock, read) );
 
+                ESOCK_ASSERT( REALLOC_BIN(&opP->data.recv.buf, read) );
             }
+            /* This transfers "ownership" of the *allocated* binary to an
+             * erlang term (no need for an explicit free).
+             */
+            data = MKBIN(env, &opP->data.recv.buf);
 
             ESOCK_CNT_INC(env, descP, sockRef,
                           esock_atom_read_pkg, &descP->readPkgCnt, 1);
@@ -3875,7 +3929,6 @@ ERL_NIF_TERM recv_check_ok(ErlNifEnv*       env,
             /* (maybe) Update max */
             if (read > descP->readPkgMax)
                 descP->readPkgMax = read;
-
 
             result = esock_make_ok2(env, data);
 
@@ -3954,10 +4007,9 @@ ERL_NIF_TERM recv_check_ok(ErlNifEnv*       env,
     }
 
     SSDBG( descP,
-           ("WIN-ESAIO", "recv_check_ok(%T) {%d} -> done with"
-            "\r\n   result: %T"
+           ("WIN-ESAIO", "recv_check_ok(%T) {%d} -> done"
             "\r\n",
-            sockRef, descP->sock, result) );
+            sockRef, descP->sock) );
 
     return result;
 }
@@ -4074,6 +4126,8 @@ ERL_NIF_TERM esaio_recvfrom(ErlNifEnv*       env,
     WSABUF          wbuf;
     DWORD           f = flags;
     size_t          bufSz = (len != 0 ? len : descP->rBufSz);
+
+    if (bufSz < ESAIO_RECVFROM_MIN_BUFSZ) bufSz = ESAIO_RECVFROM_MIN_BUFSZ;
 
     SSDBG( descP, ("WIN-ESAIO", "essio_recvfrom {%d} -> entry with"
                    "\r\n   bufSz: %d"
@@ -4263,18 +4317,13 @@ ERL_NIF_TERM recvfrom_check_ok(ErlNifEnv*       env,
                               opP->data.recvfrom.addrLen,
                               &eSockAddr);
 
-        if (read == opP->data.recvfrom.buf.size) {
-            /* This transfers "ownership" of the *allocated* binary to an
-             * erlang term (no need for an explicit free).
-             */
-            data = MKBIN(env, &opP->data.recvfrom.buf);
-        } else {
-            /* This transfers "ownership" of the *allocated* binary to an
-             * erlang term (no need for an explicit free).
-             */
-            data = MKBIN(env, &opP->data.recvfrom.buf);
-            data = MKSBIN(env, data, 0, read);
+        if (read != opP->data.recvfrom.buf.size) {
+            ESOCK_ASSERT( REALLOC_BIN(&opP->data.recvfrom.buf, read) );
         }
+        /* This transfers "ownership" of the *allocated* binary to an
+         * erlang term (no need for an explicit free).
+         */
+        data = MKBIN(env, &opP->data.recvfrom.buf);
 
         ESOCK_CNT_INC(env, descP, sockRef,
                       esock_atom_read_pkg, &descP->readPkgCnt, 1);
@@ -4813,7 +4862,12 @@ extern
 ERL_NIF_TERM esaio_close(ErlNifEnv*       env,
                          ESockDescriptor* descP)
 {
-    if (! IS_OPEN(descP->readState)) {
+    SSDBG( descP,
+           ("WIN-ESAIO",
+            "esaio_close(%d) -> begin closing\r\n",
+            descP->sock) );
+
+     if (! IS_OPEN(descP->readState)) {
         /* A bit of cheeting; maybe not closed yet - do we need a queue? */
         return esock_make_error_closed(env);
     }
@@ -4887,12 +4941,14 @@ BOOLEAN_T do_stop(ErlNifEnv*       env,
          * (will result in OPERATION_ABORTED for the threads).
          */
         if (! CancelIoEx((HANDLE) descP->sock, NULL) ) {
-            int save_errno = sock_errno();
+            int          save_errno = sock_errno();
+            ERL_NIF_TERM ereason    = ENO2T(env, save_errno);
 
             SSDBG( descP,
                    ("WIN-ESAIO",
-                    "do_stop {%d} -> cancel I/O failed: %s (%d)\r\n",
-                    descP->sock, erl_errno_id(save_errno), save_errno) );
+                    "do_stop {%d} -> cancel I/O failed: "
+                    "\r\n   %T\r\n",
+                    descP->sock, ereason) );
 
             /* Only issue an error message for errors *other* than
              * 'not found' (since 'not found' means there is no active
@@ -4902,10 +4958,9 @@ BOOLEAN_T do_stop(ErlNifEnv*       env,
             if (save_errno != ERROR_NOT_FOUND)
                 esock_error_msg("Failed cancel outstanding I/O operations:"
                                 "\r\n   Socket: " SOCKET_FORMAT_STR
-                                "\r\n   Reason: %s (%d)"
+                                "\r\n   Reason: %T"
                                 "\r\n",
-                                descP->sock,
-                                erl_errno_id(save_errno), save_errno);
+                                descP->sock, ereason);
             
             ret = FALSE;
 
@@ -5381,6 +5436,718 @@ ERL_NIF_TERM esaio_cancel_recv(ErlNifEnv*       env,
 
     return res;
 }
+
+
+
+
+/* ========================================================================
+ * IOCTL with three args (socket, request "key" and one argument)
+ *
+ * The type and value of 'arg' depend on the request,
+ * which we have not yet "analyzed".
+ *
+ * Request     arg       arg type
+ * -------     -------   --------
+ * tcp_info    version   integer()
+ * rcvall      command   atom() (off | on | iplevel)
+ */
+extern
+ERL_NIF_TERM esaio_ioctl3(ErlNifEnv*       env,
+			  ESockDescriptor* descP,
+			  unsigned long    req,
+			  ERL_NIF_TERM     arg)
+{
+  switch (req) {
+
+      /* These are *get* requests */
+
+#if defined(SIO_TCP_INFO)
+  case SIO_TCP_INFO:
+      return esaio_ioctl_tcp_info(env, descP, arg);
+      break;
+#endif
+
+    /* These are *set* requests */
+
+#if defined(SIO_RCVALL)
+  case SIO_RCVALL:
+      return esaio_ioctl_rcvall(env, descP, arg);
+      break;
+#endif
+
+#if defined(SIO_RCVALL_IGMPMCAST)
+  case SIO_RCVALL_IGMPMCAST:
+      return esaio_ioctl_rcvall_igmpmcast(env, descP, arg);
+      break;
+#endif
+
+#if defined(SIO_RCVALL_MCAST)
+  case SIO_RCVALL_MCAST:
+      return esaio_ioctl_rcvall_mcast(env, descP, arg);
+      break;
+#endif
+
+
+  default:
+      return esock_make_error(env, esock_atom_enotsup);
+      break;
+  }
+
+}
+
+
+
+#if defined(SIO_TCP_INFO)
+static
+ERL_NIF_TERM esaio_ioctl_tcp_info(ErlNifEnv*       env,
+                                  ESockDescriptor* descP,
+                                  ERL_NIF_TERM     eversion)
+{
+    DWORD        ndata = 0; // We do not actually use this
+    ERL_NIF_TERM result;
+    int          res;
+    int          version;
+  
+    SSDBG( descP, ("WIN-ESAIO", "esaio_ioctl_tcp_info(%d) -> entry with"
+                   "\r\n      (e)version: %T"
+                   "\r\n", descP->sock, eversion) );
+
+    if (!GET_INT(env, eversion, &version))
+        return enif_make_badarg(env);
+
+    switch (version) {
+    case 0:
+        {
+            TCP_INFO_v0 info;
+
+            sys_memzero((char *) &info, sizeof(info));
+            res = sock_ioctl2(descP->sock, SIO_TCP_INFO,
+                              &version, sizeof(version),
+                              &info, sizeof(info), &ndata);
+            (void) ndata;
+            if (res != 0) {
+                int          save_errno = sock_errno();
+                ERL_NIF_TERM reason     = ENO2T(env, save_errno);
+
+                SSDBG( descP,
+                       ("WIN-ESAIO", "esaio_ioctl_tcp_info(%d,v0) -> failure: "
+                        "\r\n      reason: %T"
+                        "\r\n", descP->sock, reason) );
+
+                result = esock_make_error(env, reason);
+
+            } else {
+                ERL_NIF_TERM einfo = encode_tcp_info_v0(env, &info);
+
+                result = esock_make_ok2(env, einfo);
+            }
+        }
+        break;
+
+#if defined(HAVE_TCP_INFO_V1)      
+    case 1:
+        {
+            TCP_INFO_v1 info;
+
+            sys_memzero((char *) &info, sizeof(info));
+            res = sock_ioctl2(descP->sock, SIO_TCP_INFO,
+                              &version, sizeof(version),
+                              &info, sizeof(info), &ndata);
+            (void) ndata;
+            if (res != 0) {
+                int          save_errno = sock_errno();
+                ERL_NIF_TERM reason     = ENO2T(env, save_errno);
+
+                SSDBG( descP,
+                       ("WIN-ESAIO", "esaio_ioctl_tcp_info(%d,v1) -> failure: "
+                        "\r\n      reason: %T"
+                        "\r\n", descP->sock, reason) );
+
+                result = esock_make_error(env, reason);
+
+            } else {
+                ERL_NIF_TERM einfo = encode_tcp_info_v1(env, &info);
+
+                result = esock_make_ok2(env, einfo);
+            }
+        }
+        break;
+#endif
+
+    default:
+        return enif_make_badarg(env);
+    }
+
+    SSDBG( descP,
+           ("UNIX-ESSIO", "essio_ioctl_tcp_info(%d) -> done with"
+            "\r\n      result: %T"
+            "\r\n",
+            descP->sock, result) );
+    
+    return result;
+
+}
+#endif
+
+
+/*
+  typedef struct _TCP_INFO_v0 {
+  TCPSTATE State;
+  ULONG    Mss;
+  ULONG64  ConnectionTimeMs;
+  BOOLEAN  TimestampsEnabled;
+  ULONG    RttUs;
+  ULONG    MinRttUs;
+  ULONG    BytesInFlight;
+  ULONG    Cwnd;
+  ULONG    SndWnd;
+  ULONG    RcvWnd;
+  ULONG    RcvBuf;
+  ULONG64  BytesOut;
+  ULONG64  BytesIn;
+  ULONG    BytesReordered;
+  ULONG    BytesRetrans;
+  ULONG    FastRetrans;
+  ULONG    DupAcksIn;
+  ULONG    TimeoutEpisodes;
+  UCHAR    SynRetrans;
+  } TCP_INFO_v0, *PTCP_INFO_v0;
+  *
+  typedef enum _TCPSTATE {
+  TCPSTATE_CLOSED,
+  TCPSTATE_LISTEN,
+  TCPSTATE_SYN_SENT,
+  TCPSTATE_SYN_RCVD,
+  TCPSTATE_ESTABLISHED,
+  TCPSTATE_FIN_WAIT_1,
+  TCPSTATE_FIN_WAIT_2,
+  TCPSTATE_CLOSE_WAIT,
+  TCPSTATE_CLOSING,
+  TCPSTATE_LAST_ACK,
+  TCPSTATE_TIME_WAIT,
+  TCPSTATE_MAX
+  } TCPSTATE;
+  */
+#if defined(SIO_TCP_INFO)
+static
+ERL_NIF_TERM encode_tcp_info_v0(ErlNifEnv* env, TCP_INFO_v0* infoP)
+{
+    ERL_NIF_TERM einfo;
+    ERL_NIF_TERM keys[] = {esock_atom_state,
+        esock_atom_mss,
+        esock_atom_connection_time,
+        esock_atom_timestamp_enabled,
+        esock_atom_rtt,
+        esock_atom_min_rtt,
+        esock_atom_bytes_in_flight,
+        esock_atom_cwnd,
+        esock_atom_snd_wnd,
+        esock_atom_rcv_wnd,
+        esock_atom_rcv_buf,
+        esock_atom_bytes_out,
+        esock_atom_bytes_in,
+        esock_atom_bytes_reordered,
+        esock_atom_bytes_retrans,
+        esock_atom_fast_retrans,
+        esock_atom_dup_acks_in,
+        esock_atom_timeout_episodes,
+        esock_atom_syn_retrans};
+    ERL_NIF_TERM vals[]  = {encode_tcp_state(env, infoP->State),
+        MKUL(env, infoP->Mss),
+        MKUI64(env, infoP->ConnectionTimeMs),
+        infoP->TimestampsEnabled ? esock_atom_true : esock_atom_false,
+        MKUL(env,   infoP->RttUs),
+        MKUL(env,   infoP->MinRttUs),
+        MKUL(env,   infoP->BytesInFlight),
+        MKUL(env,   infoP->Cwnd),
+        MKUL(env,   infoP->SndWnd),
+        MKUL(env,   infoP->RcvWnd),
+        MKUL(env,   infoP->RcvBuf),
+        MKUI64(env, infoP->BytesOut),
+        MKUI64(env, infoP->BytesIn),
+        MKUL(env,   infoP->BytesReordered),
+        MKUL(env,   infoP->BytesRetrans),
+        MKUL(env,   infoP->FastRetrans),
+        MKUL(env,   infoP->DupAcksIn),
+        MKUL(env,   infoP->TimeoutEpisodes),
+        MKUI(env,   infoP->SynRetrans)};
+    unsigned int numKeys = NUM(keys);
+    unsigned int numVals = NUM(vals);
+
+    ESOCK_ASSERT( numKeys == numVals );
+    ESOCK_ASSERT( MKMA(env, keys, vals, numKeys, &einfo) );
+
+    return einfo;
+}
+#endif
+
+
+/*
+  typedef struct _TCP_INFO_v1 {
+  TCPSTATE State;
+  ULONG    Mss;
+  ULONG64  ConnectionTimeMs;
+  BOOLEAN  TimestampsEnabled;
+  ULONG    RttUs;
+  ULONG    MinRttUs;
+  ULONG    BytesInFlight;
+  ULONG    Cwnd;
+  ULONG    SndWnd;
+  ULONG    RcvWnd;
+  ULONG    RcvBuf;
+  ULONG64  BytesOut;
+  ULONG64  BytesIn;
+  ULONG    BytesReordered;
+  ULONG    BytesRetrans;
+  ULONG    FastRetrans;
+  ULONG    DupAcksIn;
+  ULONG    TimeoutEpisodes;
+  UCHAR    SynRetrans;
+  ULONG    SndLimTransRwin;
+  ULONG    SndLimTimeRwin;
+  ULONG64  SndLimBytesRwin;
+  ULONG    SndLimTransCwnd;
+  ULONG    SndLimTimeCwnd;
+  ULONG64  SndLimBytesCwnd;
+  ULONG    SndLimTransSnd;
+  ULONG    SndLimTimeSnd;
+  ULONG64  SndLimBytesSnd;
+  } TCP_INFO_v1, *PTCP_INFO_v1;
+ */
+#if defined(SIO_TCP_INFO) && defined(HAVE_TCP_INFO_V1)
+static
+ERL_NIF_TERM encode_tcp_info_v1(ErlNifEnv* env, TCP_INFO_v1* infoP)
+{
+    ERL_NIF_TERM einfo;
+    ERL_NIF_TERM keys[] = {esock_atom_state,
+        esock_atom_mss,
+        esock_atom_connection_time,
+        esock_atom_timestamp_enabled,
+        esock_atom_rtt,
+        esock_atom_min_rtt,
+        esock_atom_bytes_in_flight,
+        esock_atom_cwnd,
+        esock_atom_snd_wnd,
+        esock_atom_rcv_wnd,
+        esock_atom_rcv_buf,
+        esock_atom_bytes_out,
+        esock_atom_bytes_in,
+        esock_atom_bytes_reordered,
+        esock_atom_bytes_retrans,
+        esock_atom_fast_retrans,
+        esock_atom_dup_acks_in,
+        esock_atom_timeout_episodes,
+        esock_atom_syn_retrans,
+        esock_atom_syn_lim_trans_rwin,
+        esock_atom_syn_lim_time_rwin,
+        esock_atom_syn_lim_bytes_rwin,
+        esock_atom_syn_lim_trans_cwnd,
+        esock_atom_syn_lim_time_cwnd,
+        esock_atom_syn_lim_bytes_cwnd,
+        esock_atom_syn_lim_trans_snd,
+        esock_atom_syn_lim_time_snd,
+        esock_atom_syn_lim_bytes_snd};
+    ERL_NIF_TERM vals[]  = {encode_tcp_state(env, infoP->State),
+        MKUL(env,   infoP->Mss),
+        MKUI64(end, infoP->ConnectionTimeMs),
+        infoP->TimestampsEnabled ? esock_atom_true : esock_atom_false,
+        MKUL(env,   infoP->RttUs),
+        MKUL(env,   infoP->MinRttUs),
+        MKUL(env,   infoP->BytesInFlight),
+        MKUL(env,   infoP->Cwnd),
+        MKUL(env,   infoP->SndWnd),
+        MKUL(env,   infoP->RcvWnd),
+        MKUL(env,   infoP->RcvBuf),
+        MKUI64(env, infoP->BytesOut),
+        MKUI64(env, infoP->BytesIn),
+        MKUL(env,   infoP->BytesReordered),
+        MKUL(env,   infoP->BytesRetrans),
+        MKUL(env,   infoP->FastRetrans),
+        MKUL(env,   infoP->DupAcksIn),
+        MKUL(env,   infoP->TimeoutEpisodes),
+        MKUI(env,   infoP->SynRetrans),
+        MKUL(env,   infoP->SndLimTransRwin),
+        MKUL(env,   infoP->SndLimTimeRwin),
+        MKUI64(env, infoP->SndLimBytesRwin),
+        MKUL(env,   infoP->SndLimTransCwnd),
+        MKUL(env,   infoP->SndLimTimeCwnd),
+        MKUI64(env, infoP->SndLimBytesCwnd),
+        MKUL(env,   infoP->SndLimTransSnd),
+        MKUL(env,   infoP->SndLimTimeSnd),
+        MKUI64(env, infoP->SndLimBytesSnd)};
+    unsigned int numKeys = NUM(keys);
+    unsigned int numVals = NUM(vals);
+
+    ESOCK_ASSERT( numKeys == numVals );
+    ESOCK_ASSERT( MKMA(env, keys, vals, numKeys, &einfo) );
+
+    return einfo;
+}
+#endif
+
+
+
+#if defined(SIO_TCP_INFO)
+static
+ERL_NIF_TERM encode_tcp_state(ErlNifEnv* env, TCPSTATE state)
+{
+    ERL_NIF_TERM estate;
+
+    switch (state) {
+    case TCPSTATE_CLOSED:
+        estate = esock_atom_closed;
+        break;
+    case TCPSTATE_LISTEN:
+        estate = esock_atom_listen;
+        break;
+    case TCPSTATE_SYN_SENT:
+        estate = esock_atom_syn_sent;
+        break;
+    case TCPSTATE_SYN_RCVD:
+        estate = esock_atom_syn_rcvd;
+        break;
+    case TCPSTATE_ESTABLISHED:
+        estate = esock_atom_established;
+        break;
+    case TCPSTATE_FIN_WAIT_1:
+        estate = esock_atom_fin_wait_1;
+        break;
+    case TCPSTATE_FIN_WAIT_2:
+        estate = esock_atom_fin_wait_2;
+        break;
+    case TCPSTATE_CLOSE_WAIT:
+        estate = esock_atom_close_wait;
+        break;
+    case TCPSTATE_CLOSING:
+        estate = esock_atom_closing;
+        break;
+    case TCPSTATE_LAST_ACK:
+        estate = esock_atom_last_ack;
+        break;
+    case TCPSTATE_TIME_WAIT:
+        estate = esock_atom_time_wait;
+        break;
+    case TCPSTATE_MAX:
+        estate = esock_atom_max;
+        break;
+    default:
+        estate = MKI(env, state);
+        break;
+    }
+
+    return estate;
+}
+#endif
+
+
+#if defined(SIO_RCVALL)
+static
+ERL_NIF_TERM esaio_ioctl_rcvall(ErlNifEnv*       env,
+                                ESockDescriptor* descP,
+                                ERL_NIF_TERM     evalue)
+{
+    DWORD        ndata = 0; // We do not actually use this
+    ERL_NIF_TERM result;
+    int          value, res;
+  
+    SSDBG( descP, ("WIN-ESAIO", "esaio_ioctl_rcvall(%d) -> entry with"
+                   "\r\n      (e)value: %T"
+                   "\r\n", descP->sock, evalue) );
+
+    if (! IS_ATOM(env, evalue))
+        return enif_make_badarg(env);
+
+    if (COMPARE(evalue, esock_atom_off) == 0) {
+        value = RCVALL_OFF;
+    } else if (COMPARE(evalue, esock_atom_on) == 0) {
+        value = RCVALL_ON;
+    } else if (COMPARE(evalue, esock_atom_iplevel) == 0) {
+        value = RCVALL_IPLEVEL;
+    } else {
+        return enif_make_badarg(env);
+    }
+
+    res = sock_ioctl2(descP->sock, SIO_RCVALL,
+                      &value, sizeof(value),
+                      NULL, 0, &ndata);
+    (void) ndata;
+
+    if (res != 0) {
+        int          save_errno = sock_errno();
+        ERL_NIF_TERM reason     = ENO2T(env, save_errno);
+
+        SSDBG( descP,
+               ("WIN-ESAIO", "esaio_ioctl_rcvall(%d) -> failure: "
+                "\r\n      reason: %T"
+                "\r\n", descP->sock, reason) );
+
+        result = esock_make_error(env, reason);
+
+    } else {
+
+        result = esock_atom_ok;
+
+    }
+
+    SSDBG( descP,
+           ("WIN-ESAIO", "esaio_ioctl_rcvall(%d) -> done with"
+            "\r\n      result: %T"
+            "\r\n",
+            descP->sock, result) );
+    
+    return result;
+
+}
+#endif
+
+
+
+#if defined(SIO_RCVALL_IGMPMCAST)
+static
+ERL_NIF_TERM esaio_ioctl_rcvall_igmpmcast(ErlNifEnv*       env,
+                                          ESockDescriptor* descP,
+                                          ERL_NIF_TERM     evalue)
+{
+    DWORD        ndata = 0; // We do not actually use this
+    ERL_NIF_TERM result;
+    int          value, res;
+  
+    SSDBG( descP, ("WIN-ESAIO", "esaio_ioctl_rcvall_igmpmcast(%d) -> entry with"
+                   "\r\n      (e)value: %T"
+                   "\r\n", descP->sock, evalue) );
+
+    if (! IS_ATOM(env, evalue))
+        return enif_make_badarg(env);
+
+    if (COMPARE(evalue, esock_atom_off) == 0) {
+        value = RCVALL_OFF;
+    } else if (COMPARE(evalue, esock_atom_on) == 0) {
+        value = RCVALL_ON;
+    } else {
+        return enif_make_badarg(env);
+    }
+
+    res = sock_ioctl2(descP->sock, SIO_RCVALL_IGMPMCAST,
+                      &value, sizeof(value),
+                      NULL, 0, &ndata);
+    (void) ndata;
+
+    if (res != 0) {
+        int          save_errno = sock_errno();
+        ERL_NIF_TERM reason     = ENO2T(env, save_errno);
+
+        SSDBG( descP,
+               ("WIN-ESAIO", "esaio_ioctl_rcvall_igmpmcast(%d) -> failure: "
+                "\r\n      reason: %T"
+                "\r\n", descP->sock, reason) );
+
+        result = esock_make_error(env, reason);
+
+    } else {
+
+        result = esock_atom_ok;
+
+    }
+
+    SSDBG( descP,
+           ("WIN-ESAIO", "esaio_ioctl_rcvall_igmpmcast(%d) -> done with"
+            "\r\n      result: %T"
+            "\r\n",
+            descP->sock, result) );
+    
+    return result;
+
+}
+#endif
+
+
+
+#if defined(SIO_RCVALL_MCAST)
+/*
+ * We should really have a common function for this,
+ * since igmpmcast and mcast is basically identical.
+ */
+static
+ERL_NIF_TERM esaio_ioctl_rcvall_mcast(ErlNifEnv*       env,
+                                      ESockDescriptor* descP,
+                                      ERL_NIF_TERM     evalue)
+{
+    DWORD        ndata = 0; // We do not actually use this
+    ERL_NIF_TERM result;
+    int          value, res;
+  
+    SSDBG( descP, ("WIN-ESAIO", "esaio_ioctl_rcvall_mcast(%d) -> entry with"
+                   "\r\n      (e)value: %T"
+                   "\r\n", descP->sock, evalue) );
+
+    if (! IS_ATOM(env, evalue))
+        return enif_make_badarg(env);
+
+    if (COMPARE(evalue, esock_atom_off) == 0) {
+        value = RCVALL_OFF;
+    } else if (COMPARE(evalue, esock_atom_on) == 0) {
+        value = RCVALL_ON;
+    } else {
+        return enif_make_badarg(env);
+    }
+
+    res = sock_ioctl2(descP->sock, SIO_RCVALL_MCAST,
+                      &value, sizeof(value),
+                      NULL, 0, &ndata);
+    (void) ndata;
+
+    if (res != 0) {
+        int          save_errno = sock_errno();
+        ERL_NIF_TERM reason     = ENO2T(env, save_errno);
+
+        SSDBG( descP,
+               ("WIN-ESAIO", "esaio_ioctl_rcvall_mcast(%d) -> failure: "
+                "\r\n      reason: %T"
+                "\r\n", descP->sock, reason) );
+
+        result = esock_make_error(env, reason);
+
+    } else {
+
+        result = esock_atom_ok;
+
+    }
+
+    SSDBG( descP,
+           ("WIN-ESAIO", "esaio_ioctl_rcvall_mcast(%d) -> done with"
+            "\r\n      result: %T"
+            "\r\n",
+            descP->sock, result) );
+    
+    return result;
+
+}
+#endif
+
+
+
+/* ========================================================================
+ * IOCTL with two args (socket and request "key")
+ *
+ */
+extern
+ERL_NIF_TERM esaio_ioctl2(ErlNifEnv*       env,
+			  ESockDescriptor* descP,
+			  unsigned long    req)
+{
+  switch (req) {
+
+#if defined(FIONREAD)
+  case FIONREAD:
+      return esaio_ioctl_fionread(env, descP);
+      break;
+#endif
+
+#if defined(SIOCATMARK)
+  case SIOCATMARK:
+      return esaio_ioctl_siocatmark(env, descP);
+      break;
+#endif
+
+  default:
+      return esock_make_error(env, esock_atom_enotsup);
+      break;
+  }
+
+}
+
+
+#if defined(FIONREAD)
+static
+ERL_NIF_TERM esaio_ioctl_fionread(ErlNifEnv*       env,
+                                  ESockDescriptor* descP)
+{
+    u_long       n     = 0;
+    DWORD        ndata = 0; // We do not actually use this
+    int          res;
+    ERL_NIF_TERM result;
+
+    SSDBG( descP,
+           ("WIN-ESAIO", "esaio_ioctl_fionread(%d) -> entry\r\n", descP->sock) );
+
+    res = sock_ioctl2(descP->sock, FIONREAD, NULL, 0, &n, sizeof(n), &ndata);
+    (void) ndata;
+
+    if (res != 0) {
+        int          save_errno = sock_errno();
+        ERL_NIF_TERM reason     = ENO2T(env, save_errno);
+
+        SSDBG( descP,
+               ("WIN-ESAIO", "esaio_ioctl_fionread(%d) -> failure: "
+                "\r\n      reason: %T"
+                "\r\n", descP->sock, reason) );
+
+        result = esock_make_error(env, reason);
+
+    } else {
+
+        result = esock_encode_ioctl_ivalue(env, descP, n);
+
+    }
+
+    SSDBG( descP,
+           ("WIN-ESAIO",
+            "esaio_ioctl_fionread(%d) -> done with: "
+            "\r\n   result: %T"
+            "\r\n", descP->sock, result) );
+
+    return result;
+}
+#endif
+
+
+/* For a stream socket that has been configured for inline reception of any
+ * OOB data (SO_OOBINLINE), tests if there is any OOB data waiting to be read.
+ * Returns TRUE if there data waiting to be read, FALSE otherwise.
+ */
+#if defined(SIOCATMARK)
+static
+ERL_NIF_TERM esaio_ioctl_siocatmark(ErlNifEnv*       env,
+                                    ESockDescriptor* descP)
+{
+    int          b     = 0;
+    DWORD        ndata = 0; // We do not actually use this
+    int          res;
+    ERL_NIF_TERM result;
+
+    SSDBG( descP,
+           ("WIN-ESAIO", "esaio_ioctl_siocatmark(%d) -> entry\r\n",
+            descP->sock) );
+
+    res = sock_ioctl2(descP->sock, SIOCATMARK, NULL, 0, &b, sizeof(b), &ndata);
+    (void) ndata;
+
+    if (res != 0) {
+        int          save_errno = sock_errno();
+        ERL_NIF_TERM reason     = ENO2T(env, save_errno);
+
+        SSDBG( descP,
+               ("WIN-ESAIO", "esaio_ioctl_siocatmark(%d) -> failure: "
+                "\r\n      reason: %T"
+                "\r\n", descP->sock, reason) );
+
+        result = esock_make_error(env, reason);
+
+    } else {
+
+        result = esock_encode_ioctl_bvalue(env, descP, b);
+
+    }
+
+    SSDBG( descP,
+           ("WIN-ESAIO",
+            "esaio_ioctl_siocatmark(%d) -> done with: "
+            "\r\n   result: %T"
+            "\r\n", descP->sock, result) );
+
+    return result;
+}
+#endif
 
 
 
@@ -6111,8 +6878,9 @@ void esaio_completion_accept_success(ErlNifEnv*         env,
             "maybe (%s) update (read) state (ox%X)\r\n",
             descP->sock,
             B2S((descP->acceptorsQ.first == NULL)), descP->readState) );
-    if (descP->acceptorsQ.first == NULL)
-        descP->readState &= ~ESOCK_STATE_SELECTED;
+    if (descP->acceptorsQ.first == NULL) {
+        descP->readState &= ~(ESOCK_STATE_ACCEPTING | ESOCK_STATE_SELECTED);
+    }
 }
 
 
@@ -6134,6 +6902,12 @@ void esaio_completion_accept_aborted(ErlNifEnv*         env,
 {
     ESockRequestor req;
 
+    SSDBG( descP,
+           ("WIN-ESAIO",
+            "esaio_completion_accept_aborted(%d) -> "
+            "try get request"
+            "\r\n", descP->sock) );
+
     if (esock_acceptor_get(env, descP,
                            &opDataP->accRef,
                            opCaller,
@@ -6141,32 +6915,55 @@ void esaio_completion_accept_aborted(ErlNifEnv*         env,
 
         ERL_NIF_TERM reason = esock_atom_closed;
 
+        SSDBG( descP,
+               ("WIN-ESAIO",
+                "esaio_completion_accept_aborted(%d) -> "
+                "send abort message to %T"
+                "\r\n", descP->sock, req.pid) );
+
         /* Inform the user waiting for a reply */
         esock_send_abort_msg(env, descP, opDataP->lSockRef,
                              &req, reason);
 
-        /* The socket not being open (assumed closing),
-         * means we are in the closing phase...
+    }
+
+    /* The socket not being open (assumed closing),
+     * means we are in the closing phase...
+     */
+
+    SSDBG( descP,
+           ("WIN-ESAIO",
+            "esaio_completion_accept_aborted(%d) -> "
+            "maybe send close message => "
+            "\r\n   is socket (read) open: %s"
+            "\r\n",
+            descP->sock, B2S((IS_OPEN(descP->readState)))) );
+
+    if (! IS_OPEN(descP->readState)) {
+
+        /* We can only send the 'close' message to the closer
+         * when all requests has been processed!
          */
-        if (! IS_OPEN(descP->readState)) {
 
-            /* We can only send the 'close' message to the closer
-             * when all requests has been processed!
-             */
+        /* Check "our" queue */
+        if (descP->acceptorsQ.first == NULL) {
 
-            /* Check "our" queue */
-            if (descP->acceptorsQ.first == NULL) {
+            /* Check "other" queue(s) and if there is a closer pid */
+            if ((descP->readersQ.first == NULL) &&
+                (descP->writersQ.first == NULL)) {
 
-                /* Check "other" queue(s) and if there is a closer pid */
-                if ((descP->readersQ.first == NULL) &&
-                    (descP->writersQ.first == NULL)) {
+                SSDBG( descP,
+                       ("WIN-ESAIO",
+                        "esaio_completion_accept_aborted(%d) -> "
+                        "all queues are empty => "
+                        "\r\n   send close message"
+                        "\r\n",
+                        descP->sock) );
 
-                    esaio_stop(env, descP);
+                esaio_stop(env, descP);
 
-                }
             }
         }
-
     }
 
     /* *Maybe* update socket (read) state
@@ -6175,11 +6972,11 @@ void esaio_completion_accept_aborted(ErlNifEnv*         env,
     SSDBG( descP,
            ("WIN-ESAIO",
             "esaio_completion_accept_aborted(%d) -> "
-            "maybe (%s) update (read) state (ox%X)\r\n",
+            "maybe (%s) update (read) state (0x%X)\r\n",
             descP->sock,
             B2S((descP->acceptorsQ.first == NULL)), descP->readState) );
     if (descP->acceptorsQ.first == NULL) {
-        descP->readState &= ~ESOCK_STATE_SELECTED;
+        descP->readState &= ~(ESOCK_STATE_ACCEPTING | ESOCK_STATE_SELECTED);
     }
 
 }
@@ -6225,7 +7022,7 @@ void esaio_completion_accept_failure(ErlNifEnv*         env,
             descP->sock,
             B2S((descP->acceptorsQ.first == NULL)), descP->readState) );
     if (descP->acceptorsQ.first == NULL) {
-        descP->readState &= ~ESOCK_STATE_SELECTED;
+        descP->readState &= ~(ESOCK_STATE_ACCEPTING | ESOCK_STATE_SELECTED);
     }
 
 }
@@ -6613,6 +7410,12 @@ void esaio_completion_send_aborted(ErlNifEnv*         env,
 {
     ESockRequestor req;
 
+    SSDBG( descP,
+           ("WIN-ESAIO",
+            "esaio_completion_send_aborted(%d) -> "
+            "try get request"
+            "\r\n", descP->sock) );
+
     if (esock_writer_get(env, descP,
                          &opDataP->sendRef,
                          opCaller,
@@ -6620,32 +7423,55 @@ void esaio_completion_send_aborted(ErlNifEnv*         env,
 
         ERL_NIF_TERM reason = esock_atom_closed;
 
+        SSDBG( descP,
+               ("WIN-ESAIO",
+                "esaio_completion_send_aborted(%d) -> "
+                "send abort message to %T"
+                "\r\n", descP->sock, req.pid) );
+
         /* Inform the user waiting for a reply */
         esock_send_abort_msg(env, descP, opDataP->sockRef,
                              &req, reason);
 
-        /* The socket not being open (assumed closing),
-         * means we are in the closing phase...
+    }
+
+    /* The socket not being open (assumed closing),
+     * means we are in the closing phase...
+     */
+
+    SSDBG( descP,
+           ("WIN-ESAIO",
+            "esaio_completion_send_aborted(%d) -> "
+            "maybe send close message => "
+            "\r\n   is socket (write) open: %s"
+            "\r\n",
+            descP->sock, B2S((IS_OPEN(descP->writeState)))) );
+
+    if (! IS_OPEN(descP->writeState)) {
+
+        /* We can only send the 'close' message to the closer
+         * when all requests has been processed!
          */
-        if (! IS_OPEN(descP->writeState)) {
 
-            /* We can only send the 'close' message to the closer
-             * when all requests has been processed!
-             */
+        /* Check "our" queue */
+        if (descP->writersQ.first == NULL) {
 
-            /* Check "our" queue */
-            if (descP->writersQ.first == NULL) {
+            /* Check "other" queue(s) and if there is a closer pid */
+            if ((descP->readersQ.first == NULL) &&
+                (descP->acceptorsQ.first == NULL)) {
 
-                /* Check "other" queue(s) and if there is a closer pid */
-                if ((descP->readersQ.first == NULL) &&
-                    (descP->acceptorsQ.first == NULL)) {
+                SSDBG( descP,
+                       ("WIN-ESAIO",
+                        "esaio_completion_send_aborted(%d) -> "
+                        "all queues are empty => "
+                        "\r\n   send close message"
+                        "\r\n",
+                        descP->sock) );
 
-                    esaio_stop(env, descP);
+                esaio_stop(env, descP);
 
-                }
             }
         }
-
     }
 
     /* *Maybe* update socket (write) state
@@ -6654,7 +7480,7 @@ void esaio_completion_send_aborted(ErlNifEnv*         env,
     SSDBG( descP,
            ("WIN-ESAIO",
             "esaio_completion_send_aborted(%d) -> "
-            "maybe (%s) update (write) state (ox%X)\r\n",
+            "maybe (%s) update (write) state (0x%X)\r\n",
             descP->sock,
             B2S((descP->writersQ.first == NULL)), descP->writeState) );
     if (descP->writersQ.first == NULL) {
@@ -7100,6 +7926,12 @@ void esaio_completion_sendto_aborted(ErlNifEnv*         env,
 {
     ESockRequestor req;
 
+    SSDBG( descP,
+           ("WIN-ESAIO",
+            "esaio_completion_sendto_aborted(%d) -> "
+            "try get request"
+            "\r\n", descP->sock) );
+
     if (esock_writer_get(env, descP,
                          &opDataP->sendRef,
                          opCaller,
@@ -7107,32 +7939,55 @@ void esaio_completion_sendto_aborted(ErlNifEnv*         env,
 
         ERL_NIF_TERM reason = esock_atom_closed;
 
+        SSDBG( descP,
+               ("WIN-ESAIO",
+                "esaio_completion_sendto_aborted(%d) -> "
+                "send abort message to %T"
+                "\r\n", descP->sock, req.pid) );
+
         /* Inform the user waiting for a reply */
         esock_send_abort_msg(env, descP, opDataP->sockRef,
                              &req, reason);
 
-        /* The socket not being open (assumed closing),
-         * means we are in the closing phase...
+    }
+
+    /* The socket not being open (assumed closing),
+     * means we are in the closing phase...
+     */
+
+    SSDBG( descP,
+           ("WIN-ESAIO",
+            "esaio_completion_sendto_aborted(%d) -> "
+            "maybe send close message => "
+            "\r\n   is socket (write) open: %s"
+            "\r\n",
+            descP->sock, B2S((IS_OPEN(descP->writeState)))) );
+
+    if (! IS_OPEN(descP->writeState)) {
+
+        /* We can only send the 'close' message to the closer
+         * when all requests has been processed!
          */
-        if (! IS_OPEN(descP->writeState)) {
 
-            /* We can only send the 'close' message to the closer
-             * when all requests has been processed!
-             */
+        /* Check "our" queue */
+        if (descP->writersQ.first == NULL) {
 
-            /* Check "our" queue */
-            if (descP->writersQ.first == NULL) {
+            /* Check "other" queue(s) and if there is a closer pid */
+            if ((descP->readersQ.first == NULL) &&
+                (descP->acceptorsQ.first == NULL)) {
 
-                /* Check "other" queue(s) and if there is a closer pid */
-                if ((descP->readersQ.first == NULL) &&
-                    (descP->acceptorsQ.first == NULL)) {
+                SSDBG( descP,
+                       ("WIN-ESAIO",
+                        "esaio_completion_sendto_aborted(%d) -> "
+                        "all queues are empty => "
+                        "\r\n   send close message"
+                        "\r\n",
+                        descP->sock) );
 
-                    esaio_stop(env, descP);
+                esaio_stop(env, descP);
 
-                }
             }
         }
-
     }
 
     /* *Maybe* update socket (write) state
@@ -7141,7 +7996,7 @@ void esaio_completion_sendto_aborted(ErlNifEnv*         env,
     SSDBG( descP,
            ("WIN-ESAIO",
             "esaio_completion_sendto_aborted(%d) -> "
-            "maybe (%s) update (write) state (ox%X)\r\n",
+            "maybe (%s) update (write) state (0x%X)\r\n",
             descP->sock,
             B2S((descP->writersQ.first == NULL)), descP->writeState) );
     if (descP->writersQ.first == NULL) {
@@ -7402,6 +8257,12 @@ void esaio_completion_sendmsg_aborted(ErlNifEnv*          env,
 {
     ESockRequestor req;
 
+    SSDBG( descP,
+           ("WIN-ESAIO",
+            "esaio_completion_sendmsg_aborted(%d) -> "
+            "try get request"
+            "\r\n", descP->sock) );
+
     if (esock_writer_get(env, descP,
                          &opDataP->sendRef,
                          opCaller,
@@ -7409,32 +8270,55 @@ void esaio_completion_sendmsg_aborted(ErlNifEnv*          env,
 
         ERL_NIF_TERM reason = esock_atom_closed;
 
+        SSDBG( descP,
+               ("WIN-ESAIO",
+                "esaio_completion_sendmsg_aborted(%d) -> "
+                "send abort message to %T"
+                "\r\n", descP->sock, req.pid) );
+
         /* Inform the user waiting for a reply */
         esock_send_abort_msg(env, descP, opDataP->sockRef,
                              &req, reason);
 
-        /* The socket not being open (assumed closing),
-         * means we are in the closing phase...
+    }
+
+    /* The socket not being open (assumed closing),
+     * means we are in the closing phase...
+     */
+
+    SSDBG( descP,
+           ("WIN-ESAIO",
+            "esaio_completion_sendmsg_aborted(%d) -> "
+            "maybe send close message => "
+            "\r\n   is socket (write) open: %s"
+            "\r\n",
+            descP->sock, B2S((IS_OPEN(descP->writeState)))) );
+
+    if (! IS_OPEN(descP->writeState)) {
+
+        /* We can only send the 'close' message to the closer
+         * when all requests has been processed!
          */
-        if (! IS_OPEN(descP->writeState)) {
 
-            /* We can only send the 'close' message to the closer
-             * when all requests has been processed!
-             */
+        /* Check "our" queue */
+        if (descP->writersQ.first == NULL) {
 
-            /* Check "our" queue */
-            if (descP->writersQ.first == NULL) {
+            /* Check "other" queue(s) and if there is a closer pid */
+            if ((descP->readersQ.first == NULL) &&
+                (descP->acceptorsQ.first == NULL)) {
 
-                /* Check "other" queue(s) and if there is a closer pid */
-                if ((descP->readersQ.first == NULL) &&
-                    (descP->acceptorsQ.first == NULL)) {
+                SSDBG( descP,
+                       ("WIN-ESAIO",
+                        "esaio_completion_sendmsg_aborted(%d) -> "
+                        "all queues are empty => "
+                        "\r\n   send close message"
+                        "\r\n",
+                        descP->sock) );
 
-                    esaio_stop(env, descP);
+                esaio_stop(env, descP);
 
-                }
             }
         }
-
     }
 
     /* *Maybe* update socket (write) state
@@ -7443,7 +8327,7 @@ void esaio_completion_sendmsg_aborted(ErlNifEnv*          env,
     SSDBG( descP,
            ("WIN-ESAIO",
             "esaio_completion_sendmsg_aborted(%d) -> "
-            "maybe (%s) update (write) state (ox%X)\r\n",
+            "maybe (%s) update (write) state (0x%X)\r\n",
             descP->sock,
             B2S((descP->writersQ.first == NULL)), descP->writeState) );
     if (descP->writersQ.first == NULL) {
@@ -7557,8 +8441,8 @@ BOOLEAN_T esaio_completion_recv(ESAIOThreadData* dataP,
 
     SSDBG( descP,
            ("WIN-ESAIO", "esaio_completion_recv(%d) -> entry with"
-            "\r\n   error: %s (%d)"
-            "\r\n", descP->sock, erl_errno_id(error), error) );
+            "\r\n   error: %T"
+            "\r\n", descP->sock, ENO2T(env, error)) );
 
     switch (error) {
     case NO_ERROR:
@@ -7660,7 +8544,7 @@ void esaio_completion_recv_success(ErlNifEnv*       env,
     SSDBG( descP,
            ("WIN-ESAIO",
             "esaio_completion_recv_success(%d) -> "
-            "maybe (%s) update (read) state (ox%X)\r\n",
+            "maybe (%s) update (read) state (0x%X)\r\n",
             descP->sock,
             B2S((descP->readersQ.first == NULL)), descP->readState) );
     if (descP->readersQ.first == NULL) {
@@ -7687,6 +8571,12 @@ void esaio_completion_recv_aborted(ErlNifEnv*       env,
 {
     ESockRequestor req;
 
+    SSDBG( descP,
+           ("WIN-ESAIO",
+            "esaio_completion_recv_aborted(%d) -> "
+            "try get request"
+            "\r\n", descP->sock) );
+
     if (esock_reader_get(env, descP,
                          &opDataP->recvRef,
                          opCaller,
@@ -7694,29 +8584,53 @@ void esaio_completion_recv_aborted(ErlNifEnv*       env,
 
         ERL_NIF_TERM reason = esock_atom_closed;
 
+        SSDBG( descP,
+               ("WIN-ESAIO",
+                "esaio_completion_recv_aborted(%d) -> "
+                "send abort message to %T"
+                "\r\n", descP->sock, req.pid) );
+
         /* Inform the user waiting for a reply */
         esock_send_abort_msg(env, descP, opDataP->sockRef,
                              &req, reason);
 
-        /* The socket not being open (assumed closing),
-         * means we are in the closing phase...
+    }
+
+    /* The socket not being open (assumed closing),
+     * means we are in the closing phase...
+     */
+
+    SSDBG( descP,
+           ("WIN-ESAIO",
+            "esaio_completion_recv_aborted(%d) -> "
+            "maybe send close message => "
+            "\r\n   is socket (read) open: %s"
+            "\r\n",
+            descP->sock, B2S((IS_OPEN(descP->readState)))) );
+
+    if (! IS_OPEN(descP->readState)) {
+
+        /* We can only send the 'close' message to the closer
+         * when all requests has been processed!
          */
-        if (! IS_OPEN(descP->readState)) {
 
-            /* We can only send the 'close' message to the closer
-             * when all requests has been processed!
-             */
+        /* Check "our" queue */
+        if (descP->readersQ.first == NULL) {
 
-            /* Check "our" queue */
-            if (descP->readersQ.first == NULL) {
+            /* Check "other" queue(s) and if there is a closer pid */
+            if ((descP->writersQ.first == NULL) &&
+                (descP->acceptorsQ.first == NULL)) {
 
-                /* Check "other" queue(s) and if there is a closer pid */
-                if ((descP->writersQ.first == NULL) &&
-                    (descP->acceptorsQ.first == NULL)) {
+                SSDBG( descP,
+                       ("WIN-ESAIO",
+                        "esaio_completion_recv_aborted(%d) -> "
+                        "all queues are empty => "
+                        "\r\n   send close message"
+                        "\r\n",
+                        descP->sock) );
 
-                    esaio_stop(env, descP);
+                esaio_stop(env, descP);
 
-                }
             }
         }
     }
@@ -7729,7 +8643,7 @@ void esaio_completion_recv_aborted(ErlNifEnv*       env,
     SSDBG( descP,
            ("WIN-ESAIO",
             "esaio_completion_recv_aborted(%d) -> "
-            "maybe (%s) update (read) state (ox%X)\r\n",
+            "maybe (%s) update (read) state (0x%X)\r\n",
             descP->sock,
             B2S((descP->readersQ.first == NULL)), descP->readState) );
     if (descP->readersQ.first == NULL) {
@@ -8081,11 +8995,11 @@ ERL_NIF_TERM esaio_completion_recv_partial_done(ErlNifEnv*       env,
     if (read > descP->readPkgMax)
         descP->readPkgMax = read;
 
+    ESOCK_ASSERT( REALLOC_BIN(&opDataP->buf, read) );
     /* This transfers "ownership" of the *allocated* binary to an
      * erlang term (no need for an explicit free).
      */
     data = MKBIN(opEnv, &opDataP->buf);
-    data = MKSBIN(opEnv, data, 0, read);
 
     (void) flags;
 
@@ -8396,7 +9310,7 @@ void esaio_completion_recvfrom_more_data(ErlNifEnv*           env,
         if (IS_OPEN(descP->readState)) {
             /* We do not actually need to call this function
              * since we already know its 'more_data', but just
-             * get the same format...
+             * to get the same format...
              */
             ERL_NIF_TERM reason           = MKT2(env,
                                                  esock_atom_completion_status,
@@ -8466,6 +9380,12 @@ void esaio_completion_recvfrom_aborted(ErlNifEnv*           env,
 {
     ESockRequestor req;
 
+    SSDBG( descP,
+           ("WIN-ESAIO",
+            "esaio_completion_recvfrom_aborted(%d) -> "
+            "try get request"
+            "\r\n", descP->sock) );
+
     if (esock_reader_get(env, descP,
                          &opDataP->recvRef,
                          opCaller,
@@ -8473,29 +9393,53 @@ void esaio_completion_recvfrom_aborted(ErlNifEnv*           env,
 
         ERL_NIF_TERM reason = esock_atom_closed;
 
+        SSDBG( descP,
+               ("WIN-ESAIO",
+                "esaio_completion_recvfrom_aborted(%d) -> "
+                "send abort message to %T"
+                "\r\n", descP->sock, req.pid) );
+
         /* Inform the user waiting for a reply */
         esock_send_abort_msg(env, descP, opDataP->sockRef,
                              &req, reason);
 
-        /* The socket not being open (assumed closing),
-         * means we are in the closing phase...
+    }
+
+    /* The socket not being open (assumed closing),
+     * means we are in the closing phase...
+     */
+
+    SSDBG( descP,
+           ("WIN-ESAIO",
+            "esaio_completion_recvfrom_aborted(%d) -> "
+            "maybe send close message => "
+            "\r\n   is socket (read) open: %s"
+            "\r\n",
+            descP->sock, B2S((IS_OPEN(descP->readState)))) );
+
+    if (! IS_OPEN(descP->readState)) {
+
+        /* We can only send the 'close' message to the closer
+         * when all requests has been processed!
          */
-        if (! IS_OPEN(descP->readState)) {
 
-            /* We can only send the 'close' message to the closer
-             * when all requests has been processed!
-             */
+        /* Check "our" queue */
+        if (descP->readersQ.first == NULL) {
 
-            /* Check "our" queue */
-            if (descP->readersQ.first == NULL) {
+            /* Check "other" queue(s) and if there is a closer pid */
+            if ((descP->writersQ.first == NULL) &&
+                (descP->acceptorsQ.first == NULL)) {
 
-                /* Check "other" queue(s) and if there is a closer pid */
-                if ((descP->writersQ.first == NULL) &&
-                    (descP->acceptorsQ.first == NULL)) {
+                SSDBG( descP,
+                       ("WIN-ESAIO",
+                        "esaio_completion_recvfrom_aborted(%d) -> "
+                        "all queues are empty => "
+                        "\r\n   send close message"
+                        "\r\n",
+                        descP->sock) );
 
-                    esaio_stop(env, descP);
+                esaio_stop(env, descP);
 
-                }
             }
         }
     }
@@ -8508,7 +9452,7 @@ void esaio_completion_recvfrom_aborted(ErlNifEnv*           env,
     SSDBG( descP,
            ("WIN-ESAIO",
             "esaio_completion_recvfrom_aborted(%d) -> "
-            "maybe (%s) update (read) state (ox%X)\r\n",
+            "maybe (%s) update (read) state (0x%X)\r\n",
             descP->sock,
             B2S((descP->readersQ.first == NULL)), descP->readState) );
     if (descP->readersQ.first == NULL) {
@@ -8659,7 +9603,7 @@ void esaio_completion_recvfrom_completed(ErlNifEnv*           env,
             "\r\n   CompletionInfo: %T"
             "\r\n", MKPID(env, opCaller), completionInfo) );
 
-    /* Send a 'send' completion message */
+    /* Send a 'recvfrom' completion message */
     esaio_send_completion_msg(env,              // Send env
                               descP,            // Descriptor
                               opCaller,         // Msg destination
@@ -8793,11 +9737,11 @@ ERL_NIF_TERM esaio_completion_recvfrom_partial(ErlNifEnv*           env,
                           opDataP->addrLen,
                           &eSockAddr);
 
+    ESOCK_ASSERT( REALLOC_BIN(&opDataP->buf, read) );
     /* This transfers "ownership" of the *allocated* binary to an
      * erlang term (no need for an explicit free).
      */
     data = MKBIN(opEnv, &opDataP->buf);
-    data = MKSBIN(opEnv, data, 0, read);
 
     /* We ignore the flags *for now*.
      * Needs to be passed up eventually!
@@ -9007,6 +9951,12 @@ void esaio_completion_recvmsg_aborted(ErlNifEnv*          env,
 {
     ESockRequestor req;
 
+    SSDBG( descP,
+           ("WIN-ESAIO",
+            "esaio_completion_recvmsg_aborted(%d) -> "
+            "try get request"
+            "\r\n", descP->sock) );
+
     if (esock_reader_get(env, descP,
                          &opDataP->recvRef,
                          opCaller,
@@ -9014,32 +9964,55 @@ void esaio_completion_recvmsg_aborted(ErlNifEnv*          env,
 
         ERL_NIF_TERM reason = esock_atom_closed;
 
+        SSDBG( descP,
+               ("WIN-ESAIO",
+                "esaio_completion_recvmsg_aborted(%d) -> "
+                "send abort message to %T"
+                "\r\n", descP->sock, req.pid) );
+
         /* Inform the user waiting for a reply */
         esock_send_abort_msg(env, descP, opDataP->sockRef,
                              &req, reason);
 
-        /* The socket not being open (assumed closing),
-         * means we are in the closing phase...
+    }
+
+    /* The socket not being open (assumed closing),
+     * means we are in the closing phase...
+     */
+
+    SSDBG( descP,
+           ("WIN-ESAIO",
+            "esaio_completion_recvmsg_aborted(%d) -> "
+            "maybe send close message => "
+            "\r\n   is socket (read) open: %s"
+            "\r\n",
+            descP->sock, B2S((IS_OPEN(descP->readState)))) );
+
+    if (! IS_OPEN(descP->readState)) {
+
+        /* We can only send the 'close' message to the closer
+         * when all requests has been processed!
          */
-        if (! IS_OPEN(descP->readState)) {
 
-            /* We can only send the 'close' message to the closer
-             * when all requests has been processed!
-             */
+        /* Check "our" queue */
+        if (descP->readersQ.first == NULL) {
 
-            /* Check "our" queue */
-            if (descP->readersQ.first == NULL) {
+            /* Check "other" queue(s) and if there is a closer pid */
+            if ((descP->writersQ.first == NULL) &&
+                (descP->acceptorsQ.first == NULL)) {
 
-                /* Check "other" queue(s) and if there is a closer pid */
-                if ((descP->writersQ.first == NULL) &&
-                    (descP->acceptorsQ.first == NULL)) {
+                SSDBG( descP,
+                       ("WIN-ESAIO",
+                        "esaio_completion_recvmsg_aborted(%d) -> "
+                        "all queues are empty => "
+                        "\r\n   send close message"
+                        "\r\n",
+                        descP->sock) );
 
-                    esaio_stop(env, descP);
+                esaio_stop(env, descP);
 
-                }
             }
         }
-
     }
 
     FREE_BIN( &opDataP->data[0] );
@@ -9051,7 +10024,7 @@ void esaio_completion_recvmsg_aborted(ErlNifEnv*          env,
     SSDBG( descP,
            ("WIN-ESAIO",
             "esaio_completion_recvmsg_aborted(%d) -> "
-            "maybe (%s) update (read) state (ox%X)\r\n",
+            "maybe (%s) update (read) state (0x%X)\r\n",
             descP->sock,
             B2S((descP->readersQ.first == NULL)), descP->readState) );
     if (descP->readersQ.first == NULL) {
@@ -9556,8 +10529,12 @@ void esaio_stop(ErlNifEnv*       env,
      * +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
      */
 
-    if (! IS_PID_UNDEF(&descP->closerPid)) {
-        /* We have a waiting closer process after nif_close()
+    if ( !IS_PID_UNDEF(&descP->closerPid) &&
+        (descP->closeEnv != NULL) ) {
+
+        /* We will only send this message if the user was made to 
+         * wait (async close). In that case we have en env!
+         * We have a waiting closer process after nif_close()
          * - send message to trigger nif_finalize_close()
          */
 

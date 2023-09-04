@@ -188,7 +188,7 @@ DEC_NITEMS(DbTableHash* DB, DbTableHashLockAndCounter* LCK_CTR, HashValue HASH)
 #define BUCKET(tb, i) SEGTAB(tb)[SLOT_IX_TO_SEG_IX(i)]->buckets[(i) & EXT_SEGSZ_MASK]
 
 #ifdef DEBUG
-#  define DBG_BUCKET_INACTIVE ((HashDbTerm*)0xdead5107)
+#  define DBG_BUCKET_INACTIVE ((HashDbTerm*)(UWord)0xdead5107)
 #endif
 
 
@@ -276,7 +276,7 @@ static ERTS_INLINE int is_pseudo_deleted(HashDbTerm* p)
 /* optimised version of make_hash (normal case? atomic key) */
 #define MAKE_HASH(term) \
     ((is_atom(term) ? (atom_tab(atom_val(term))->slot.bucket.hvalue) : \
-      make_internal_hash(term, 0)) & MAX_HASH_MASK)
+      erts_internal_hash(term)) & MAX_HASH_MASK)
 
 #  define GET_LOCK_MASK(NUMBER_OF_LOCKS) ((NUMBER_OF_LOCKS)-1)
 

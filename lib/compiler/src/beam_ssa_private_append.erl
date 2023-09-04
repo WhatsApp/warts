@@ -57,9 +57,8 @@
 -spec opt(st_map(), func_info_db()) -> {st_map(), func_info_db()}.
 opt(StMap, FuncDb) ->
     %% Ignore functions which are not in the function db (never
-    %% called) or are stubs for nifs.
-    Funs = [ F || F <- maps:keys(StMap),
-                  is_map_key(F, FuncDb), not is_nif(F, StMap)],
+    %% called).
+    Funs = [ F || F <- maps:keys(StMap), is_map_key(F, FuncDb)],
     private_append(Funs, StMap, FuncDb).
 
 private_append(Funs, StMap0, FuncDb) ->
@@ -262,10 +261,10 @@ track_value_in_fun([{#b_var{}=V,Element}|Rest], Fun, Work0, Defs,
                                                    Element, DefSt0),
                     track_value_in_fun(ToExplore ++ Rest, Fun, Work0,
                                        Defs, ValuesInFun, DefSt);
-                {put_tuple,_,_} ->
+                {put_tuple,_,_} when Element =/= self ->
                     track_put_tuple(Args, Element, Rest, Fun, V, Work0,
                                     Defs, ValuesInFun, DefSt0);
-                {put_list,_,_} ->
+                {put_list,_,_} when Element =/= self ->
                     track_put_list(Args, Element, Rest, Fun, V, Work0,
                                    Defs, ValuesInFun, DefSt0);
                 {_,_,_} ->
@@ -330,7 +329,12 @@ track_put_tuple(FieldVars, {tuple_element,Idx,Element},
             DefSt = add_literal(Fun, {opargs,Dst,Idx,Lit,Element}, DefSt0),
             track_value_in_fun(Work, Fun, GlobalWork,
                                Defs, ValuesInFun, DefSt)
-    end.
+    end;
+track_put_tuple(_FieldVars, {hd,_},
+                Work, Fun, _Dst, GlobalWork,
+                Defs, ValuesInFun, DefSt) ->
+    track_value_in_fun(Work, Fun, GlobalWork,
+                       Defs, ValuesInFun, DefSt).
 
 track_put_list([Hd,_Tl], {hd,Element},
                Work, Fun, Dst, GlobalWork,
@@ -349,7 +353,10 @@ track_put_list([Hd,_Tl], {hd,Element},
         #b_literal{val=Lit} ->
             DefSt = add_literal(Fun, {opargs,Dst,0,Lit,Element}, DefSt0),
             track_value_in_fun(Work, Fun, GlobalWork, Defs, ValuesInFun, DefSt)
-    end.
+    end;
+track_put_list([_Hd,_Tl], {tuple_element,_,_}, Work, Fun, _Dst, GlobalWork,
+               Defs, ValuesInFun, DefSt) ->
+    track_value_in_fun(Work, Fun, GlobalWork, Defs, ValuesInFun, DefSt).
 
 %% Find all calls to Callee and produce a work-list containing all
 %% values which are used as the Idx:th argument.
@@ -546,7 +553,9 @@ merge_arg_patches([{Idx,Lit,P0},{Idx,Lit,P1}|Patches]) ->
             {{tuple_element,I0,E0},{tuple_element,I1,E1}} ->
                 {tuple_elements,[{I0,E0},{I1,E1}]};
             {{tuple_elements,Es},{tuple_element,I,E}} ->
-                {tuple_elements,[{I,E}|Es]}
+                {tuple_elements,[{I,E}|Es]};
+            {_,_} ->
+                [P0|merge_arg_patches([P1|Patches])]
         end,
     merge_arg_patches([{Idx,Lit,P}|Patches]);
 merge_arg_patches([P|Patches]) ->
@@ -594,12 +603,16 @@ patch_literal_term([H0|T0], {hd,Element}, Cnt0) ->
     {Dst,Cnt} = new_var(Cnt1),
     I = #b_set{op=put_list,dst=Dst,args=[H,T]},
     {Dst, [I|Extra], Cnt};
+patch_literal_term([_|_]=Pair, Elems, Cnt) when is_list(Elems) ->
+    [Elem] = [E || {hd,_}=E <- Elems],
+    patch_literal_term(Pair, Elem, Cnt);
 patch_literal_term(Lit, [], Cnt) ->
     {#b_literal{val=Lit}, [], Cnt}.
 
-patch_literal_tuple(Tuple, Elements, Cnt) ->
+patch_literal_tuple(Tuple, Elements0, Cnt) ->
     ?DP("Will patch literal tuple~n  tuple:~p~n  elements: ~p~n",
-              [Tuple,Elements]),
+        [Tuple,Elements0]),
+    Elements = [ E || {tuple_element,_,_}=E <- Elements0],
     patch_literal_tuple(erlang:tuple_to_list(Tuple), Elements, [], [], 0, Cnt).
 
 patch_literal_tuple([Lit|LitElements], [{tuple_element,Idx,Element}|Elements],
@@ -619,9 +632,8 @@ patch_literal_tuple([], [], Patched, Extra, _, Cnt0) ->
     I = #b_set{op=put_tuple,dst=V,args=reverse(Patched)},
     {V, [I|Extra], Cnt}.
 
-%% As beam_ssa_opt:new_var/2, but with a hard-coded base
 new_var(Count) ->
-    {#b_var{name={alias_opt,Count}},Count+1}.
+    {#b_var{name=Count},Count+1}.
 
 %% Done with an accumulator to reverse the reversed block order from
 %% patch_appends_f/5.
@@ -637,16 +649,3 @@ insert_block_additions([Blk0={L,B=#b_blk{is=Is0}}|RevLinear],
     insert_block_additions(RevLinear, Lbl2Addition, [Blk|Acc]);
 insert_block_additions([], _, Acc) ->
     Acc.
-
-%%%
-%%% Predicate to check if a function is the stub for a nif.
-%%%
--spec is_nif(func_id(), st_map()) -> boolean().
-
-is_nif(F, StMap) ->
-    #opt_st{ssa=[{0,#b_blk{is=Is}}|_]} = map_get(F, StMap),
-    case Is of
-        [#b_set{op=nif_start}|_] ->
-            true;
-        _ -> false
-    end.
